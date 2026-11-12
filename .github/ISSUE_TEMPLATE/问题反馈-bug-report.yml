@@ -1,0 +1,111 @@
+name: 问题反馈 / Bug Report
+description: 反馈椒盐播放器 CUE 支持插件的问题。 / Report a bug in CUE-for-Salt-Player.
+title: "[程序错误] "
+labels: ["bug"]
+assignees: ["tigerJX95"]
+type: Bug
+
+body:
+  - type: dropdown
+    id: affected-platform
+    attributes:
+      label: 💻 受影响的平台与渠道 / Affected Platform and Channel
+      description: |
+        请选择已确认受影响的环境。三个渠道均可复现时，选择最后一项。
+
+        Select an environment where you reproduced the issue. Select the last option if it affects all three.
+      multiple: false
+      options:
+        - Windows · 微软商店 / Windows · Microsoft Store
+        - Windows · Steam
+        - Linux · Steam
+        - 三个渠道均受影响 / All three channels
+    validations:
+      required: true
+
+  - type: input
+    id: player-version
+    attributes:
+      label: 🎵 播放器版本 / Player Version
+      description: |
+        请填写椒盐播放器的版本，可在播放器的关于页面查看。
+
+        Enter the Salt Player version shown on the About page.
+      placeholder: 例如 / e.g. 1.19.3
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: ☑️ 提交前确认 / Before You Submit
+      options:
+        - label: 我已查看项目说明，并搜索过已有议题。 / I have read the project documentation and searched existing issues.
+          required: true
+        - label: 此议题只反馈一个问题。 / I am reporting one issue in this submission.
+          required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 📦 插件版本 / Plugin Version
+      description: |
+        请填写 CUE-for-Salt-Player 的版本，可在播放器的插件页面查看。
+
+        Enter the CUE-for-Salt-Player version shown on the player's Plugins page.
+      placeholder: 例如 / e.g. v0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: system-version
+    attributes:
+      label: 🖥️ 操作系统版本 / OS Version
+      placeholder: 例如 / e.g. Windows 10 22H2 / Ubuntu 26.04.1 LTS
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: 🐛 问题描述与实际表现 / Bug Description and Actual Behavior
+      description: |
+        请说明问题发生在哪个页面或操作中，以及实际看到了什么。
+
+        Describe where the issue occurred, what you were doing, and what actually happened.
+      placeholder: 例如 / e.g. 无法展示分轨音频 / .Unable to display multi-track audio.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 🔄 复现步骤 / Steps to Reproduce
+      description: |
+        请按顺序列出操作。偶发问题请注明出现频率。
+
+        List the steps in order. If the issue is intermittent, say how often it occurs.
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: ✅ 预期表现 / Expected Behavior
+      description: |
+        请说明该操作在正常情况下应有的表现。
+
+        Describe what you expected to happen.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 📸 截图、日志或补充信息 / Screenshots, Logs, or Additional Context
+      description: |
+        可附上截图、录屏或相关日志。上传前请移除个人信息。
+
+        Attach any relevant screenshots, screen recordings, or logs. Remove personal information before uploading.
