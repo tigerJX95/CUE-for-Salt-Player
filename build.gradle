@@ -1,0 +1,64 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version '2.4.20'
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.4.20'
+}
+
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+kotlin {
+    compilerOptions.jvmTarget = JvmTarget.JVM_17
+}
+
+def workshopApi = 'com.github.Moriafly.spw-workshop-api:spw-workshop-api:0.1.0-dev22'
+def pf4j = 'org.pf4j:pf4j:3.12.0'
+def kotlinStdlib = 'org.jetbrains.kotlin:kotlin-stdlib:2.4.20'
+
+dependencies {
+    compileOnly 'org.jetbrains.compose.foundation:foundation-desktop:1.12.0'
+    compileOnly 'org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2'
+    compileOnly workshopApi
+    compileOnly pf4j
+    compileOnly kotlinStdlib
+    testCompileOnly('androidx.compose.runtime:runtime-desktop:1.12.0') { transitive = false }
+    testImplementation workshopApi
+    testImplementation pf4j
+    testImplementation kotlinStdlib
+    testImplementation 'junit:junit:4.13.2'
+}
+
+tasks.named('jar', Jar) {
+    from('LICENSE') {
+        into('META-INF')
+    }
+    manifest {
+        attributes(
+            'Plugin-Class': 'spw.cue.CuePlugin',
+            'Plugin-Id': 'spw.cue.support',
+            'Plugin-Version': project.version.toString(),
+            'Plugin-Provider': 'CUE for Salt Player',
+            'Plugin-Name': 'CUE for Salt Player',
+            'Plugin-Description': 'External CUE tracks in Salt Player albums and songs',
+            'Plugin-Has-Config': 'true',
+            'Plugin-Permissions': 'key-bindings,library-read,class-transform'
+        )
+    }
+}
+
+tasks.register('plugin', Zip) {
+    group = 'build'
+    description = 'Build the SPW workshop package'
+    def mainJar = tasks.named('jar', Jar)
+    dependsOn mainJar
+    archiveFileName = "CUE-for-Salt-Player-v${project.version}.spmod"
+    destinationDirectory = layout.buildDirectory.dir('libs')
+    into('classes') {
+        from { zipTree(mainJar.get().archiveFile.get().asFile) }
+    }
+}

@@ -1,0 +1,22 @@
+pluginManagement {
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+        google {
+            content { includeGroupByRegex('androidx\\..*') }
+        }
+        maven {
+            url = 'https://jitpack.io'
+            content { includeGroup('com.github.Moriafly.spw-workshop-api') }
+            metadataSources { artifact() }
+        }
+    }
+}
+
+rootProject.name = 'CUE-for-Salt-Player'

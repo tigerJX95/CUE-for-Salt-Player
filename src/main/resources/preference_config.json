@@ -1,0 +1,24 @@
+{
+  "configs": [
+    {
+      "title": "CUE 分轨",
+      "config": "config.json",
+      "preferences": [
+        {
+          "key": "showCueSongs",
+          "type": "switch",
+          "title": "在歌曲页显示 CUE 分轨",
+          "summary": "默认在歌曲页单独显示 CUE 曲目，可搜索并直接点播。自动更新，重启后继续生效。",
+          "default_value": true
+        },
+        {
+          "key": "hideWholeTrack",
+          "type": "switch",
+          "title": "识别 CUE 后隐藏整轨",
+          "summary": "在专辑页和已启用 CUE 分轨的歌曲页隐藏对应整轨，修改后自动更新。",
+          "default_value": false
+        }
+      ]
+    }
+  ]
+}
