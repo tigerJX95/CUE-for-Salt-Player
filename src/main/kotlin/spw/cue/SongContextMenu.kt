@@ -12,20 +12,20 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 
 @Composable
-internal fun SongContextMenu(onHide: () -> Unit, content: @Composable () -> Unit) {
+internal fun SongContextMenu(items: () -> List<ContextMenuItem>, content: @Composable () -> Unit) {
     val hostMenu = LocalContextMenuRepresentation.current
     val largerTextMenu = remember(hostMenu) {
         object : ContextMenuRepresentation {
             @Composable
             override fun Representation(state: ContextMenuState, items: () -> List<ContextMenuItem>) {
                 val density = LocalDensity.current
-                CompositionLocalProvider(LocalDensity provides Density(density.density, density.fontScale * 1.2f)) {
+                CompositionLocalProvider(LocalDensity provides Density(density.density * 1.125f, density.fontScale * 1.2f)) {
                     hostMenu.Representation(state, items)
                 }
             }
         }
     }
     CompositionLocalProvider(LocalContextMenuRepresentation provides largerTextMenu) {
-        ContextMenuArea(items = { listOf(ContextMenuItem("从歌曲页隐藏此分轨", onHide)) }, content = content)
+        ContextMenuArea(items = items, content = content)
     }
 }

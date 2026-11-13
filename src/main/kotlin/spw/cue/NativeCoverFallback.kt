@@ -80,29 +80,34 @@ internal class NativeCoverFallback private constructor(
         installFileCover(checkNotNull(gridCaller) { "未找到专辑卡片封面调用" }, active, report)
 
     fun installSongs(active: () -> Boolean, report: (String) -> Unit): AutoCloseable =
-        installFileCover(checkNotNull(songCaller) { "未找到歌曲封面调用" }, active, report)
+        installFileCover(checkNotNull(songCaller) { "未找到歌曲封面调用" }, active, report, useSongArtwork = true)
 
-    private fun installFileCover(caller: String, active: () -> Boolean, report: (String) -> Unit): AutoCloseable {
+    private fun installFileCover(
+        caller: String, active: () -> Boolean, report: (String) -> Unit, useSongArtwork: Boolean = false
+    ): AutoCloseable {
         val getVri = render.parameterTypes[0].getMethod("getVri")
-        val toPlatformPath = checkNotNull(platformPath) { "未找到宿主音频路径转换器" }
+        val toPlatformPath = platformPath
+        check(useSongArtwork || toPlatformPath != null) { "未找到宿主音频路径转换器" }
         HostCatalog.requireSingleCall(HostCatalog.type(caller), render)
         return WorkshopApi.hookRegistrar.replaceComposable(
             render.declaringClass.name, render.name, caller, render.composeParameters(), 50
         ) { call ->
             val model = call.arguments.firstOrNull()
-            val path = if (active() && model != null) runCatching {
+            val songArtwork = if (useSongArtwork && active()) LocalCueSongArtwork.current else null
+            val path = if (songArtwork == null && active() && model != null && toPlatformPath != null) runCatching {
                 LibraryProbe.localPath(toPlatformPath.invoke(null, getVri.invoke(model)) as? String)
             }.getOrNull() else null
             coverWithPlaceholder(call, active(), { found ->
                 if (found && active()) report("已绘制同目录封面")
             }) {
-                if (!active()) {
-                    null
-                } else if (path == null) {
-                    SideEffect { report("原生无封面，宿主音频路径不可用") }
-                    null
-                } else {
-                    key(path, model) { gridArtwork(path, report) }
+                when {
+                    !active() -> null
+                    songArtwork != null -> songArtwork.image()
+                    path != null -> key(path, model) { gridArtwork(path, report) }
+                    else -> {
+                        SideEffect { report("原生无封面，宿主音频路径不可用") }
+                        null
+                    }
                 }
             }
         }

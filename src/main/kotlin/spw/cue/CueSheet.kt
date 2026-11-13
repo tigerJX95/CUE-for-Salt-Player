@@ -20,11 +20,10 @@ internal data class CueTrack(
     val startFrame: Long,
     val nextStartFrame: Long?,
     val index00Frame: Long?,
-    val pregapFrame: Long?
-) {
-    val startMs: Long get() = startFrame * 1_000 / 75
-    val endMs: Long? get() = nextStartFrame?.let { it * 1_000 / 75 }
-}
+    val pregapFrame: Long?,
+    val startMs: Long = startFrame * 1_000 / 75,
+    val endMs: Long? = nextStartFrame?.let { it * 1_000 / 75 }
+)
 
 internal fun String?.artistName(): String? {
     val name = this?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -73,11 +72,19 @@ internal object CueParser {
         }
     }
 
-    private fun parse(cue: Path, encoding: String, source: String): CueSheet {
+    fun readEmbedded(audio: Path, bytes: ByteArray): CueSheet {
+        require(bytes.size <= MAX_BYTES) { "内嵌 CUE 超过 1 MiB" }
+        val source = Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString().removePrefix("\uFEFF")
+        require('\u0000' !in source) { "内嵌 CUE 包含 NUL" }
+        return parse(audio, "FLAC 内嵌 CUE · UTF-8", source, audio.toAbsolutePath().normalize())
+    }
+
+    private fun parse(cue: Path, encoding: String, source: String, embeddedAudio: Path? = null): CueSheet {
         val folder = cue.toAbsolutePath().normalize().parent
         var album: String? = null
         var albumPerformer: String? = null
-        var audio: Path? = null
+        var audio = embeddedAudio
+        var fileDeclared = false
         var current: Draft? = null
         val drafts = mutableListOf<Draft>()
         source.lineSequence().forEachIndexed { lineNumber, raw ->
@@ -90,7 +97,12 @@ internal object CueParser {
                     "FILE" -> {
                         val match = requireNotNull(filePattern.matchEntire(value)) { "FILE 格式错误" }
                         val path = match.groupValues[1].ifEmpty { match.groupValues[2] }
-                        audio = resolveAudio(folder, path)
+                        if (embeddedAudio == null) {
+                            audio = resolveAudio(folder, path)
+                        } else {
+                            require(!fileDeclared && drafts.isEmpty()) { "内嵌 CUE 只能引用当前音频" }
+                        }
+                        fileDeclared = true
                         current = null
                     }
                     "TRACK" -> {

@@ -139,7 +139,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                     else -> error("无法定位插件配置目录")
                 }
                 SongVisibility(path.toAbsolutePath().resolveSibling("song-visibility.txt"))
-            }.getOrNull()
+            }.getOrNull().also(CueRemoval::bind)
             val listener = Consumer<ConfigHelper> { helper ->
                 if (activeSession === session) {
                     try {
@@ -367,6 +367,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         songPageHook = null
         songPage = null
         songVisibility = null
+        CueRemoval.bind(null)
         songDiagnostics = SongPageDiagnostics()
         runCatching { taskbarCue?.close() }
         taskbarCue = null

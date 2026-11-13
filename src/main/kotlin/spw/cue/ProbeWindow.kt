@@ -131,7 +131,7 @@ internal class ProbeWindow(
 
     private fun discoverCurrent() {
         if (worker != null) return
-        clearResult("正在查找当前音频同目录的 CUE…")
+        clearResult("正在查找当前音频的外置或内嵌 CUE…")
         runTask({
             val current = LibraryProbe.current()
             val audio = LibraryProbe.pathOf(current)
@@ -143,7 +143,7 @@ internal class ProbeWindow(
                 audio == null -> status = "请先在椒盐播放本地整轨，或手动打开 CUE。"
                 file == null || inspected == null -> {
                     report = "当前播放  $audio"
-                    status = "同目录未找到匹配的 CUE，可手动打开查看具体错误。"
+                    status = "未找到匹配的外置或内嵌 CUE，可手动打开外置 CUE 排查。"
                 }
                 else -> showResult(file, inspected, "已找到")
             }

@@ -19,7 +19,6 @@ internal data class AlbumCue(val tracks: List<CueTrack>, val durationMs: Long) {
         val window = CuePlaybackWindow.from(track, sourceEnd)
         window?.let { formatCueTime(it.durationMs) } ?: "—"
     }
-    val timeColumnChars = maxOf(8, trackDurationLabels.maxOfOrNull(String::length) ?: 0)
 }
 
 internal object LibraryProbe {

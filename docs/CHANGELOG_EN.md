@@ -2,6 +2,12 @@
 
 [中文](CHANGELOG.md) | [English](CHANGELOG_EN.md)
 
+## v0.2.0 — 2026-11-13
+
+- **Embedded FLAC CUE.** Supports `CUESHEET` text tags and binary CUESHEET metadata blocks. A matching external sheet takes priority. Full-length WAV files use an external sheet in the same folder.
+- **Batch hide and remove.** The Songs context menu can hide or remove one or more CUE tracks and shows the number affected. Hiding affects Songs and its search results. Removing also takes tracks out of Album Details. Press **Ctrl+Alt+U** to restore tracks hidden or removed through the plugin.
+- **List display.** Aligns full-length and CUE track durations in Album Details, uses tabular numerals for CUE track durations, and supplies folder artwork for full-length WAV entries in Songs.
+
 ## v0.1.0 — 2026-11-12
 
 - **External CUE sheets.** Finds a matching sheet next to an album audio file. Album Details shows the track number, title, and duration. Selecting a track plays it from its `INDEX 01` position. The original audio entry can be hidden in settings.

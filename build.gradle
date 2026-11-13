@@ -5,7 +5,7 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.compose' version '2.4.20'
 }
 
-version = '0.1.0'
+version = '0.2.0'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -44,7 +44,7 @@ tasks.named('jar', Jar) {
             'Plugin-Version': project.version.toString(),
             'Plugin-Provider': 'CUE for Salt Player',
             'Plugin-Name': 'CUE for Salt Player',
-            'Plugin-Description': 'External CUE tracks in Salt Player albums and songs',
+            'Plugin-Description': 'External and FLAC-embedded CUE tracks in Salt Player albums and songs',
             'Plugin-Has-Config': 'true',
             'Plugin-Permissions': 'key-bindings,library-read,class-transform'
         )
@@ -56,7 +56,7 @@ tasks.register('plugin', Zip) {
     description = 'Build the SPW workshop package'
     def mainJar = tasks.named('jar', Jar)
     dependsOn mainJar
-    archiveFileName = "CUE-for-Salt-Player-v${project.version}.spmod"
+    archiveFileName = "CUE_for_Salt_Player_v${project.version.toString().replace('-', '_')}.spmod"
     destinationDirectory = layout.buildDirectory.dir('libs')
     into('classes') {
         from { zipTree(mainJar.get().archiveFile.get().asFile) }

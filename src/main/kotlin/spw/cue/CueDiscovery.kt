@@ -19,6 +19,7 @@ internal object CueDiscovery {
         if (preferred.isNotEmpty()) return unique(preferred)
 
         return matches(candidates - sameName.toSet(), audio).takeIf { it.isNotEmpty() }?.let(::unique)
+            ?: EmbeddedFlacCue.find(audio)
     }
 
     // The Songs page receives whole-library snapshots. Read each directory and CUE once per snapshot.
@@ -46,6 +47,10 @@ internal object CueDiscovery {
             for ((audio, matches) in byAudio) {
                 val preferred = matches.filter { stem(it.path) == stem(audio) }.ifEmpty { matches }
                 preferred.singleOrNull()?.let { put(audio, it) }
+            }
+            for (audio in available - byAudio.keys) {
+                if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
+                EmbeddedFlacCue.find(audio)?.let { put(audio, it) }
             }
         }
     }

@@ -24,9 +24,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.currentComposer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.internal.ComposableLambda
-import androidx.compose.runtime.key
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -36,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
@@ -112,7 +110,7 @@ internal class NativeSongCue(
         val matchedTracks: Int
     )
     private sealed interface RowPlan {
-        data class Original(val index: Int) : RowPlan
+        data class Original(val index: Int, val artwork: SongArtwork?) : RowPlan
         data class Cue(val song: Song) : RowPlan
     }
     private data class GroupPlan(val nativeCount: Int, val rows: List<RowPlan>)
@@ -576,14 +574,15 @@ internal class NativeSongCue(
         val groups = target.groupEntities(state).filterNotNull()
         val rowPlans = mutableListOf<GroupPlan>()
         val cueKeys = mutableSetOf<String>()
-        val cueSources = songs.values.mapTo(HashSet()) { it.source.id }
+        val cueSources = songs.values.associate { it.source.id to it.artwork }
         val nativeGroups = mutableListOf<Any>()
         val renderingGroups = groups.map { group ->
             val originals = mutableListOf<Any>()
             val rows = target.tracksIn(group).filterNotNull().map { entity ->
-                val song = songs[target.id(entity)]
+                val id = target.id(entity)
+                val song = songs[id]
                 if (song == null) {
-                    RowPlan.Original(originals.size).also { originals.add(entity) }
+                    RowPlan.Original(originals.size, cueSources[id]).also { originals.add(entity) }
                 } else {
                     cueKeys.add(song.key)
                     RowPlan.Cue(song)
@@ -667,7 +666,7 @@ internal class NativeSongCue(
     private fun withCueRows(
         original: Array<Any?>, rows: List<RowPlan>, selection: NativeSongSelection?, selectionState: Any?
     ): Array<Any?> {
-        if (rows.none { it is RowPlan.Cue }) return original
+        if (rows.all { it is RowPlan.Original && it.artwork == null }) return original
         val key = original[1] as (Int) -> Any?
         val type = original[2] as (Int) -> Any?
         val flag = original[3] as (Int) -> Boolean
@@ -688,7 +687,13 @@ internal class NativeSongCue(
         }
         val rowContent: @Composable (Any, Int) -> Unit = { scope, i ->
             when (val row = rows[i]) {
-                is RowPlan.Original -> content(scope, row.index, currentComposer, 0)
+                is RowPlan.Original -> if (row.artwork == null) {
+                    content(scope, row.index, currentComposer, 0)
+                } else {
+                    CompositionLocalProvider(LocalCueSongArtwork provides row.artwork) {
+                        content(scope, row.index, currentComposer, 0)
+                    }
+                }
                 is RowPlan.Cue -> SongRowMenu(row.song, selection, selectionState)
             }
         }
@@ -701,11 +706,30 @@ internal class NativeSongCue(
         if (store == null) {
             SongRow(song, selection, selectionState)
         } else {
-            SongContextMenu(onHide = { changeVisibility { store.hide(song.visibilityKey) } }) {
+            val items = CueRemoval.menu(
+                { changeVisibility { store.hide(song.visibilityKey) } },
+                { changeVisibility { store.remove(song.visibilityKey) } },
+                { selectedRemovalEntries(selection, selectionState) },
+                { removeSelectedEntries(store, it) },
+                { hideSelectedEntries(store, it) }
+            )
+            SongContextMenu(items) {
                 SongRow(song, selection, selectionState)
             }
         }
     }
+
+    private fun selectedRemovalEntries(selection: NativeSongSelection?, state: Any?): Set<String> {
+        val store = visibility ?: return emptySet()
+        if (selection == null || state == null) return emptySet()
+        return CueRemoval.selectedEntries(target, pageState, selection.keys(state), store)
+    }
+
+    private fun removeSelectedEntries(store: SongVisibility, entries: Set<String>) =
+        changeVisibility { store.remove(entries) }
+
+    private fun hideSelectedEntries(store: SongVisibility, entries: Set<String>) =
+        changeVisibility { store.hide(entries) }
 
     private fun invoke(method: Method, scope: Any, args: Array<Any?>): Any? = try {
         method.invoke(scope, *args)
@@ -832,14 +856,13 @@ internal class NativeSongCue(
 
     @Composable
     private fun SongCover(artwork: SongArtwork) {
-        val cover by key(artwork) { produceState<ImageBitmap?>(null) { value = artwork.load() } }
+        val cover = artwork.image()
         Box(
             Modifier.size(48.dp).clip(RoundedCornerShape(4.dp)).background(Color.Gray.copy(alpha = 0.16f)),
             contentAlignment = Alignment.Center
         ) {
-            val image = cover
-            if (image != null) {
-                Image(image, contentDescription = null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            if (cover != null) {
+                Image(cover, contentDescription = null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 NativeAlbumText("♪", singleLine = true)
             }

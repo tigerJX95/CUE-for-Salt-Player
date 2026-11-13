@@ -29,7 +29,7 @@ internal class NativeSongSelection private constructor(
 ) {
     fun state(selector: Any?): Any? = selector?.let { scrollState.invoke(it) }
     fun selecting(state: Any): Boolean = selectionMode.invoke(state) == true
-    private fun keys(state: Any): Set<*> = selectedKeys.invoke(state) as Set<*>
+    fun keys(state: Any): Set<*> = selectedKeys.invoke(state) as Set<*>
     fun checked(state: Any, key: String): Boolean = key in keys(state)
 
     fun toggle(state: Any, key: String) {

@@ -132,7 +132,7 @@ private fun AlbumCueRows(
     var seeking by remember(trackId) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     LaunchedEffect(trackId) {
-        report("正在通过公开曲库查找整轨和同目录 CUE")
+        report("正在通过公开曲库查找整轨及对应的 CUE")
         try {
             val (loaded, image) = withContext(Dispatchers.IO) {
                 val album = LibraryProbe.findAlbumCue(trackId)
@@ -152,13 +152,15 @@ private fun AlbumCueRows(
             report("查找 CUE 失败：${if (error is IllegalStateException) error.message else error.javaClass.simpleName}")
         }
     }
-    val album = cue ?: return
+    val album = cue?.let(CueRemoval::visibleAlbum) ?: return
     val tracks = album.tracks
     if (tracks.isEmpty()) return
-    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    val durationWidth = (album.timeColumnChars * 8 + 2).dp * fontScale
+    val theme = nativeSongRowTheme()
+    val gap = theme.gap.dp
+    val durationWidth = with(LocalDensity.current) { (48.dp.roundToPx() + 2 * gap.roundToPx()).toDp() }
+    val durationStyle = theme.detailStyle.copy(fontFeatureSettings = "tnum")
     SideEffect { report("已提交至原生布局 · ${tracks.size} 轨") }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+    Column(Modifier.fillMaxWidth().padding(start = 12.dp)) {
         NativeAlbumText("分轨 ${tracks.size}", Modifier.padding(horizontal = 4.dp, vertical = 12.dp))
         if (wholeTrackHidden && playAt == null) {
             NativeAlbumText("使用专辑播放按钮开始播放后，点选分轨即可跳转。", Modifier.padding(horizontal = 12.dp))
@@ -185,7 +187,7 @@ private fun AlbumCueRows(
                             }
                         }
                     }
-                }.heightIn(min = 40.dp).padding(start = 24.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                }.heightIn(min = 40.dp).padding(start = 24.dp, end = gap, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 NativeAlbumText(
@@ -204,7 +206,8 @@ private fun AlbumCueRows(
                     album.trackDurationLabels[index],
                     Modifier.width(durationWidth),
                     singleLine = true,
-                    style = albumCueRowStyle
+                    style = durationStyle,
+                    color = theme.detailColor
                 )
             }
         }

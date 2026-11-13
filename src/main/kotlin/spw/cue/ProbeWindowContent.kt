@@ -122,7 +122,7 @@ internal fun ProbeWindowContent(
                 ProbeAction("查找当前 CUE", colors, enabled = !busy, onClick = onDiscover)
                 ProbeAction("手动打开…", colors, enabled = !busy, onClick = onOpen)
                 if (hiddenSongCount > 0) {
-                    ProbeAction("恢复隐藏分轨", colors, onClick = onRestoreHiddenSongs)
+                    ProbeAction("恢复隐藏和移除的分轨", colors, onClick = onRestoreHiddenSongs)
                 }
                 ProbeText(
                     if (result?.sheet?.title != null) source.orEmpty() else "",
