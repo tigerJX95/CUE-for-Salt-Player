@@ -2,6 +2,13 @@
 
 [中文](CHANGELOG.md) | [English](CHANGELOG_EN.md)
 
+## v0.3.0 — 2026-11-15
+
+- **Multi-disc albums.** Supports a separate external CUE sheet for each disc or a single sheet with multiple `FILE` entries for audio files in the same folder. Album Details follows Salt Player’s disc order and shows CUE tracks directly after the corresponding full-length entry. Selecting a track loads the correct audio file and seeks to its start.
+- **Album count and artwork.** The Songs count in the album header includes visible CUE tracks and regular songs. If native artwork is missing, the plugin checks the album’s common parent folder first and then each disc folder in disc order.
+- **Permissions and lifecycle.** Shortcut registration and native UI integration check their own permissions. With only shortcut permission, the CUE window can still open external sheets for preview. Settings load in the background. Disabling the plugin cancels its tasks and cleans up its windows and listeners.
+- **Fixed hiding original tracks in multi-disc albums.** With the hide option enabled, Album Details hides an original row when it has visible CUE tracks. On discs with a single full-length entry, the CUE count and track list then appear directly below the disc heading. Discs without visible CUE tracks keep their original rows.
+
 ## v0.2.0 — 2026-11-13
 
 - **Embedded FLAC CUE.** Supports `CUESHEET` text tags and binary CUESHEET metadata blocks. A matching external sheet takes priority. Full-length WAV files use an external sheet in the same folder.

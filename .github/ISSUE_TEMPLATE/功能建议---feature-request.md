@@ -1,6 +1,6 @@
 ---
 name: 功能建议 / Feature Request
-about: 提出新功能或改进建议 / Suggest a new feature or improvement
+about: 为椒盐播放器 CUE 分轨插件提出建议 / Suggest an improvement to CUE for Salt Player
 title: "[功能增强]"
 labels: enhancement
 assignees: tigerJX95
@@ -10,14 +10,14 @@ type: Feature
 
 🎯 功能概述 / Feature Summary
 
-请简要描述你希望新增或改进的功能。
-Briefly describe the feature or improvement you would like to see.
+请简要描述你想改进的 CUE 识别、分轨列表或播放行为。
+Describe the change you would like to see in CUE recognition, track lists, or playback.
 
 
 🔍 需求背景 / Problem or Motivation
 
-目前遇到了什么问题？现有功能有哪些不足？为什么需要这项改进？
-What problem are you trying to solve? What limitations exist in the current functionality?
+请说明你是怎样浏览或播放整轨专辑的，以及现有流程在哪一步不方便。
+Describe how you browse or play your albums and where the current workflow falls short.
 
 
 ✨ 期望实现 / Proposed Solution
@@ -33,8 +33,8 @@ Have you considered any alternative solutions or workarounds? If so, please desc
 
 📸 参考资料 / References
 
-如有相关截图、界面草图、示例或参考链接，可以在此提供。
-You may attach screenshots, mockups, examples, or relevant links.
+可以附截图、界面草图或其他播放器的参考链接。涉及 CUE 解析时，也可以附去掉个人路径的片段。
+You may attach screenshots, mockups, or a reference from another player. For CUE parsing requests, you can also include an excerpt with local paths removed.
 
 
 📝 补充说明 / Additional Context

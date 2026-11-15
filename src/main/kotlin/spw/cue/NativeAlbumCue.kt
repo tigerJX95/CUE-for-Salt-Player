@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -28,11 +30,15 @@ import com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi
 import com.xuncorp.spw.workshop.api.WorkshopApi
 import com.xuncorp.spw.workshop.api.hook.MethodHookParam
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import java.awt.EventQueue
 
 private val albumCueRowStyle = TextStyle(
     fontSize = 16.sp,
@@ -45,9 +51,15 @@ internal class NativeAlbumCue(
     private val target: AlbumHookTarget,
     private val active: () -> Boolean,
     private val hideWholeTrack: () -> Boolean,
+    private val lookupScope: CoroutineScope,
     private val report: (String) -> Unit
 ) {
     private data class MatchedAlbum(val page: Any, val trackId: String)
+    private class DiscRequest(val ids: List<String>)
+    private var discRequest: DiscRequest? = null
+    private var discLookup: Job? = null
+    private var discMatches by mutableStateOf<Pair<DiscRequest, Map<String, AlbumCue>>?>(null)
+    private val multiDiscSeeking = mutableStateOf(false)
     private var matchedAlbum by mutableStateOf<Pair<MatchedAlbum, AlbumCue>?>(null)
     data class Artwork(val trackId: String, val image: ImageBitmap)
     var artwork by mutableStateOf<Artwork?>(null)
@@ -57,9 +69,9 @@ internal class NativeAlbumCue(
         if (!active()) return
         try {
             val args = call.args
-            val track = target.singleTrack(args) ?: return
+            val tracks = target.albumTracks(args)
+            if (tracks.isEmpty()) return
             val page = args.getOrNull(5) ?: return
-            val match = MatchedAlbum(page, track.id)
             val scope = args.lastOrNull() ?: return
             report("已收到专辑页回调，等待插入分轨区")
             val (proxy, list) = target.recordList(scope)
@@ -72,8 +84,28 @@ internal class NativeAlbumCue(
             }
             if (!list.hasFooter || !active()) return
             call.setResult(result)
+            val track = tracks.singleOrNull()
+            if (track == null) {
+                val byId = tracks.associateBy { it.id }
+                val ids = tracks.map { it.id }
+                val request = if (hideWholeTrack()) {
+                    loadDiscMatches(ids)
+                } else {
+                    cancelDiscLookup()
+                    null
+                }
+                val matches = discMatches?.takeIf { it.first === request }?.second.orEmpty()
+                val hiddenIds = matches.filterValues { CueRemoval.visibleAlbum(it).tracks.isNotEmpty() }.keys
+                list.applyByTrack(ids, hiddenIds, append = { id, hidden ->
+                    appendDisc(scope, byId.getValue(id), hidden, matches[id])
+                }, appendFallback = { appendMultiDisc(scope, tracks) })
+                return
+            }
+
+            cancelDiscLookup()
+            val match = MatchedAlbum(page, track.id)
             val album = matchedAlbum?.takeIf { it.first == match }?.second
-            list.apply(hideWholeTrack() && album != null) { hidden ->
+            list.apply(hideWholeTrack() && album != null && CueRemoval.visibleAlbum(album).tracks.isNotEmpty()) { hidden ->
                 append(scope, match, track, hidden, compact = true)
             }
         } catch (error: Exception) {
@@ -84,23 +116,84 @@ internal class NativeAlbumCue(
     fun afterList(call: MethodHookParam) {
         if (!active() || call.isOriginalSkipped || call.throwable != null) return
         try {
-            val track = target.singleTrack(call.args) ?: return
+            val tracks = target.albumTracks(call.args)
+            if (tracks.isEmpty()) return
             val page = call.args.getOrNull(5) ?: return
             val scope = call.args.lastOrNull() ?: return
-            append(scope, MatchedAlbum(page, track.id), track, hidden = false, compact = false)
+            val track = tracks.singleOrNull()
+            if (track == null) {
+                appendMultiDisc(scope, tracks)
+            } else {
+                append(scope, MatchedAlbum(page, track.id), track, hidden = false, compact = false)
+            }
         } catch (error: Exception) {
             report("读取专辑页失败：${error.javaClass.simpleName}")
         }
     }
+
+    private fun loadDiscMatches(ids: List<String>): DiscRequest {
+        discRequest?.takeIf { it.ids == ids }?.let { return it }
+        discLookup?.cancel()
+        val request = DiscRequest(ids)
+        discRequest = request
+        discLookup = lookupScope.launch {
+            try {
+                val context = currentCoroutineContext()
+                val albums = runInterruptible(Dispatchers.IO) {
+                    LibraryProbe.findAlbumCueSources(request.ids) { active() && context.isActive }
+                        .associate { it.trackId to it.cue }
+                }
+                EventQueue.invokeLater {
+                    // A toggle or album change may have superseded this request while the lookup ran.
+                    if (active() && discRequest === request) discMatches = request to albums
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (active()) report("查找多碟 CUE 失败：${error.javaClass.simpleName}")
+            }
+        }
+        return request
+    }
+
+    private fun cancelDiscLookup() {
+        discRequest = null
+        discLookup?.cancel()
+        discLookup = null
+    }
+
+    private fun appendDisc(scope: Any, track: AlbumHookTarget.Track, hidden: Boolean, resolvedCue: AlbumCue?) {
+        try {
+            val playAt = playbackFor(track)
+            target.appendCue(scope, track.id) {
+                if (active()) AlbumCueRows(track.id, hidden, playAt, active, report, multiDiscSeeking, resolvedCue)
+            }
+        } catch (error: Exception) {
+            report("追加分轨区失败：${error.javaClass.simpleName}")
+        }
+    }
+
+    private fun appendMultiDisc(scope: Any, tracks: List<AlbumHookTarget.Track>): Boolean {
+        if (!active()) return false
+        val ids = tracks.map { it.id }
+        val byId = tracks.associateBy { it.id }
+        target.appendCue(scope, ids.joinToString(prefix = "multi-disc:", separator = ",") { "${it.length}:$it" }) {
+            if (active()) MultiDiscCueRows(ids, active, report) { id -> byId[id]?.let(::playbackFor) }
+        }
+        return true
+    }
+
+    private fun playbackFor(track: AlbumHookTarget.Track): ((Long, Boolean) -> Unit)? =
+        target.playback?.let { playback ->
+            { position: Long, switchSource: Boolean -> playback.playAt(track, position, switchSource) }
+        }
 
     private fun append(
         scope: Any, match: MatchedAlbum, track: AlbumHookTarget.Track, hidden: Boolean, compact: Boolean
     ): Boolean {
         if (!active()) return false
         return try {
-            val playAt = target.playback?.let { playback ->
-                { position: Long, switchSource: Boolean -> playback.playAt(track, position, switchSource) }
-            }
+            val playAt = playbackFor(track)
             target.appendCue(scope, match.trackId) {
                 if (active()) {
                     AlbumCueRows(match.trackId, hidden, playAt, active, report) { album, cover ->
@@ -126,42 +219,92 @@ internal class NativeAlbumCue(
 @Composable
 private fun AlbumCueRows(
     trackId: String, wholeTrackHidden: Boolean, playAt: ((Long, Boolean) -> Unit)?, active: () -> Boolean,
-    report: (String) -> Unit, onMatch: (AlbumCue?, ImageBitmap?) -> Unit
+    report: (String) -> Unit, sharedSeeking: MutableState<Boolean>? = null,
+    resolvedCue: AlbumCue? = null, onMatch: ((AlbumCue?, ImageBitmap?) -> Unit)? = null
 ) {
-    var cue by remember(trackId) { mutableStateOf<AlbumCue?>(null) }
-    var seeking by remember(trackId) { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    LaunchedEffect(trackId) {
+    var cue by remember(trackId, resolvedCue) { mutableStateOf(resolvedCue) }
+    LaunchedEffect(trackId, resolvedCue) {
+        if (resolvedCue != null) return@LaunchedEffect
         report("正在通过公开曲库查找整轨及对应的 CUE")
         try {
             val (loaded, image) = withContext(Dispatchers.IO) {
                 val album = LibraryProbe.findAlbumCue(trackId)
-                val image = album.tracks.firstOrNull()?.audio?.let { audio ->
+                val image = album.tracks.firstOrNull()?.audio?.takeIf { onMatch != null }?.let { audio ->
                     runCatching { FolderCover.load(audio)?.toComposeImageBitmap() }.getOrNull()
                 }
                 album to image
             }
             cue = loaded
             val tracks = loaded.tracks
-            onMatch(loaded, image)
+            onMatch?.invoke(loaded, image)
             report(if (tracks.isEmpty()) "已读取专辑整轨，未找到匹配 CUE" else "已识别 ${tracks.size} 轨，等待界面应用")
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            onMatch(null, null)
+            onMatch?.invoke(null, null)
             report("查找 CUE 失败：${if (error is IllegalStateException) error.message else error.javaClass.simpleName}")
         }
     }
     val album = cue?.let(CueRemoval::visibleAlbum) ?: return
+    if (album.tracks.isEmpty()) return
+    SideEffect { report("已提交至原生布局 · ${album.tracks.size} 轨") }
+    val seeking = sharedSeeking ?: remember(trackId) { mutableStateOf(false) }
+    AlbumCueSection(album, null, wholeTrackHidden, playAt, active, seeking)
+}
+
+@Composable
+private fun MultiDiscCueRows(
+    ids: List<String>, active: () -> Boolean, report: (String) -> Unit,
+    playAt: (String) -> ((Long, Boolean) -> Unit)?
+) {
+    var sources by remember(ids) { mutableStateOf<List<AlbumCueSource>>(emptyList()) }
+    val seeking = remember(ids) { mutableStateOf(false) }
+    LaunchedEffect(ids) {
+        report("正在查找专辑各碟的 CUE")
+        try {
+            val loaded = withContext(Dispatchers.IO) {
+                val context = currentCoroutineContext()
+                LibraryProbe.findAlbumCueSources(ids) { active() && context.isActive }
+            }
+            sources = loaded
+            if (loaded.isEmpty()) report("未找到匹配的多碟 CUE")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (active()) report("查找多碟 CUE 失败：${error.javaClass.simpleName}")
+        }
+    }
+    val visible = sources.map { it to CueRemoval.visibleAlbum(it.cue) }.filter { it.second.tracks.isNotEmpty() }
+    if (visible.isEmpty()) return
+    SideEffect { report("已提交至原生布局 · ${visible.size} 碟 · ${visible.sumOf { it.second.tracks.size }} 轨") }
+    Column {
+        for ((source, album) in visible) {
+            key(source.trackId) {
+                val filename = source.audio.fileName.toString()
+                val duplicateName = sources.count { it.audio.fileName == source.audio.fileName } > 1
+                val label = if (duplicateName) "${source.audio.parent.fileName}/$filename" else filename
+                AlbumCueSection(album, label, false, playAt(source.trackId), active, seeking)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlbumCueSection(
+    album: AlbumCue, label: String?, wholeTrackHidden: Boolean, playAt: ((Long, Boolean) -> Unit)?,
+    active: () -> Boolean, seekingState: MutableState<Boolean>
+) {
+    var seeking by seekingState
+    val scope = rememberCoroutineScope()
     val tracks = album.tracks
     if (tracks.isEmpty()) return
     val theme = nativeSongRowTheme()
     val gap = theme.gap.dp
     val durationWidth = with(LocalDensity.current) { (48.dp.roundToPx() + 2 * gap.roundToPx()).toDp() }
     val durationStyle = theme.detailStyle.copy(fontFeatureSettings = "tnum")
-    SideEffect { report("已提交至原生布局 · ${tracks.size} 轨") }
     Column(Modifier.fillMaxWidth().padding(start = 12.dp)) {
-        NativeAlbumText("分轨 ${tracks.size}", Modifier.padding(horizontal = 4.dp, vertical = 12.dp))
+        val heading = if (label == null) "分轨 ${tracks.size}" else "$label · 分轨 ${tracks.size}"
+        NativeAlbumText(heading, Modifier.padding(horizontal = 4.dp, vertical = 12.dp), singleLine = true)
         if (wholeTrackHidden && playAt == null) {
             NativeAlbumText("使用专辑播放按钮开始播放后，点选分轨即可跳转。", Modifier.padding(horizontal = 12.dp))
         }

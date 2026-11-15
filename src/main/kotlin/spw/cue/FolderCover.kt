@@ -16,6 +16,18 @@ internal object FolderCover {
 
     fun load(audio: Path, maxSize: Int = 512): BufferedImage? {
         val directory = audio.parent ?: return null
+        return loadDirectory(directory, maxSize)
+    }
+
+    fun loadMultiDisc(audioFiles: List<Path>, maxSize: Int = 512): BufferedImage? {
+        val directories = audioFiles.mapNotNull { it.parent }.distinct()
+        val shared = directories.firstOrNull()?.parent?.takeIf { candidate ->
+            directories.size > 1 && candidate.parent != null && directories.all { it.parent == candidate }
+        }
+        return (listOfNotNull(shared) + directories).firstNotNullOfOrNull { loadDirectory(it, maxSize) }
+    }
+
+    private fun loadDirectory(directory: Path, maxSize: Int): BufferedImage? {
         for (name in names) {
             val path = directory.resolve(name)
             try {

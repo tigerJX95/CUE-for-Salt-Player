@@ -4,7 +4,7 @@
 
 A desktop Salt Player plugin for external CUE sheets and CUE data embedded in FLAC files. Browse, search, and play individual tracks in Album Details and Songs.
 
-**Current version v0.2.0** · [Changelog](CHANGELOG_EN.md)
+**Current version v0.3.0** · [Changelog](CHANGELOG_EN.md)
 
 > [!IMPORTANT]
 > **A full-length WAV file requires an external CUE sheet.** Put the matching `.cue` file in the same folder, for example `Album.wav` and `Album.cue`. The plugin does not interpret WAV cue markers as tracks.
@@ -17,11 +17,11 @@ A CD rip can be stored as one audio file, with its track titles and start positi
 
 ## Features
 
-- **Album Details.** Shows the number, title, and duration of each CUE track under its disc. The disc heading uses Salt Player's native layout.
+- **Album Details.** Shows the number, title, and duration of each CUE track under its disc. Multi-disc albums group CUE tracks by disc. The album’s Songs count includes visible CUE tracks and regular songs.
 - **Songs.** Browse, search, play, and select individual CUE tracks. Entries include artwork, artist, an audio quality badge, and duration.
 - **Playback controls.** The playback bar and Now Playing show the current track's title, artist, and track-relative progress. Previous and Next can move between adjacent CUE tracks.
 - **Artist credits and desktop titles.** Credits come from the track-level or album-level CUE `PERFORMER`, then the audio file or the library's album artist. Windows taskbar and Ubuntu Dock window titles follow the current track.
-- **Folder artwork.** When Salt Player has no artwork for the album, the plugin can use a cover image next to the audio file. All tracks share that cover.
+- **Folder artwork.** When Salt Player has no artwork for the album, the plugin can use a cover image next to the audio file. For a multi-disc album, the header can also use artwork from the common parent folder of the disc folders.
 
 ## Installation and use
 
@@ -59,12 +59,14 @@ If Salt Player has no native cover, the plugin checks these filenames in order a
 | 3 | `folder.png` |
 | 4 | `folder.jpg` |
 
+For example, put the audio and CUE sheet for disc 1 in `Album/CD1/` and those for disc 2 in `Album/CD2/`. Salt Player must group both discs under the same album. A single CUE sheet with multiple `FILE` entries for audio files in the same folder also works.
+
 ## Settings
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | 在歌曲页显示 CUE 分轨 (Show CUE tracks on Songs) | On | Lists CUE tracks and includes them in Songs search |
-| 识别 CUE 后隐藏整轨 (Hide the original track when a CUE sheet is found) | Off | Shows the CUE tracks and hides the matching original audio entry |
+| 识别 CUE 后隐藏整轨 (Hide the original track when a CUE sheet is found) | Off | In Album Details, hides original rows with visible CUE tracks. On discs with a single full-length entry, the CUE list then follows the disc heading directly. In Songs, hides the original entries that match a CUE sheet |
 
 ## Compatibility
 
@@ -76,9 +78,9 @@ If Salt Player has no native cover, the plugin checks these filenames in order a
 
 ## Diagnostics and limitations
 
-- Album Details shows CUE tracks when Salt Player groups exactly one full-length audio entry into the album. Entries grouped into that album count together even if their files are in separate folders.
+- Album Details follows the album grouping in Salt Player. Discs assigned to the same album can be stored in separate folders.
 - Press **Ctrl+Alt+U** to find the current CUE sheet or open one manually. The CUE window can display sheets that reference several files. Double-click a track in the currently playing file to seek to its start.
-- If tracks are missing in Album Details, check how many audio entries Salt Player has grouped into the album. For external sheets, also check the `FILE` line and file locations. Use Diagnostics or the native interface report in the CUE window for details.
+- If tracks are missing in Album Details, check that the audio files are in the library and grouped under the expected album. For external sheets, also check the `FILE` line and file locations. Use Diagnostics or the native interface report in the CUE window for details.
 - The native UI integrates through Workshop. Some integration points may need to be updated after a Salt Player upgrade.
 
 ## Build from source
@@ -90,6 +92,6 @@ Use **JDK 25**. The Gradle Wrapper uses **Gradle 9.8.0**. Run the appropriate co
 | Windows | `build.cmd` |
 | Linux | `bash gradlew clean test plugin` |
 
-The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.2.0.spmod`.
+The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.3.0.spmod`.
 
 Licensed under the [MIT License](../LICENSE).

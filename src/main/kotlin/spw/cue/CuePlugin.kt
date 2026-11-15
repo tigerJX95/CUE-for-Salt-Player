@@ -10,15 +10,30 @@ import com.xuncorp.spw.workshop.api.SpwPlugin
 import com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi
 import com.xuncorp.spw.workshop.api.WorkshopApi
 import com.xuncorp.spw.workshop.api.config.ConfigHelper
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel as CoroutineChannel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import org.pf4j.Extension
 import java.awt.event.KeyEvent
-import java.io.File
-import java.nio.file.Path
 import java.util.function.Consumer
 import javax.swing.SwingUtilities
 
 class CuePlugin(context: PluginContext) : SpwPlugin(context) {
-    @Volatile private var activeSession: Any? = null
+    @OptIn(UnstableSpwWorkshopApi::class)
+    private class Session {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val configChanges = CoroutineChannel<ConfigHelper>(CoroutineChannel.CONFLATED)
+        var configReady = false
+        var preparingNativeUi = false
+    }
+
+    @Volatile private var activeSession: Session? = null
+    private var nativeIndexReady = false
     private var shortcut: AutoCloseable? = null
     private var window: ProbeWindow? = null
     private var follow: CueFollow? = null
@@ -39,6 +54,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     private val showCueSongs = mutableStateOf(true)
     @Volatile private var albumHookStatus = "尚未注册"
     @Volatile private var albumCoverStatus = "尚未注册"
+    @Volatile private var albumStatisticsStatus = "尚未注册"
     @Volatile private var gridCoverStatus = "尚未注册"
     @Volatile private var albumPageStatus = "尚未收到专辑页回调"
     @Volatile private var songCoverStatus = "尚未注册"
@@ -46,63 +62,143 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     @Volatile private var miniPlayerStatus = "尚未注册"
     @Volatile private var taskbarStatus: String? = null
 
+    @Synchronized
     override fun start() {
-        val manager = WorkshopApi.manager
-        if (!manager.isPermissionGranted(PluginPermission.KEY_BINDINGS) ||
-            !manager.isPermissionGranted(PluginPermission.LIBRARY_READ)
-        ) {
-            WorkshopApi.ui.toast("CUE 分轨需要快捷键与曲库读取权限", WorkshopApi.Ui.ToastType.Warning)
-            return
-        }
-        val session = Any()
-        shortcut = manager.keyBindingManager.register(
-            "open-cue-probe", "CUE for Salt Player：打开 CUE 分轨窗口",
-            ActionShortcut(KeyEvent.VK_U, ActionShortcut.CONTROL or ActionShortcut.ALT),
-            false
-        ) {
-            SwingUtilities.invokeLater {
-                if (activeSession === session) {
-                    val current = windowFor(session)
-                    windowPinned = true
-                    current.isAutoRequestFocus = true
-                    current.isVisible = true
-                    current.toFront()
-                    current.loadOnFirstOpen()
-                }
-            }
-        }
+        if (activeSession != null) return
+        val session = Session()
         activeSession = session
-        observeConfig(session)
-        registerAlbumHook(session, retry = false)
-        registerSongs(session)
-        registerPlaybackCover(session)
-        if (canTryNativeUi() && manager.isPermissionGranted(PluginPermission.CLASS_TRANSFORM)) {
-            miniPlayerStatus = try {
-                miniPlayerCue = NativeMiniPlayerCue({ activeSession === session }) { status ->
-                    if (activeSession === session) miniPlayerStatus = status
+        val manager = WorkshopApi.manager
+        if (manager.isPermissionGranted(PluginPermission.KEY_BINDINGS)) {
+            try {
+                shortcut = manager.keyBindingManager.register(
+                    "open-cue-probe", "CUE for Salt Player：打开 CUE 分轨窗口",
+                    ActionShortcut(KeyEvent.VK_U, ActionShortcut.CONTROL or ActionShortcut.ALT),
+                    false
+                ) {
+                    dispatch(session) {
+                        val current = windowFor(session)
+                        windowPinned = true
+                        current.isAutoRequestFocus = true
+                        current.isVisible = true
+                        current.toFront()
+                        current.loadOnFirstOpen()
+                    }
                 }
-                miniPlayerStatus
             } catch (error: Exception) {
-                "注册失败：${error.cause?.message ?: error.message ?: error.javaClass.simpleName}"
+                WorkshopApi.ui.toast("CUE 快捷键不可用：${error.javaClass.simpleName}", WorkshopApi.Ui.ToastType.Warning)
             } catch (error: LinkageError) {
-                "宿主接口不兼容：${error.javaClass.simpleName}"
+                WorkshopApi.ui.toast("当前宿主的快捷键接口不兼容", WorkshopApi.Ui.ToastType.Warning)
             }
-            miniPlayerCue?.let { registerTaskbarTitle(session, it) }
         }
-        val usePopup = albumHook == null
+
+        albumHookStatus = "正在准备专辑页接入"
+        albumPageStatus = "尚未收到专辑页回调"
+        albumCoverStatus = "尚未注册"
+        albumStatisticsStatus = "尚未注册"
+        gridCoverStatus = "尚未注册"
+        songCoverStatus = "尚未注册"
+        miniPlayerStatus = "尚未注册"
+        playbackCoverStatus = "尚未注册"
+        val unavailable = nativeUnavailableReason()
+        if (unavailable == null) {
+            // Stage album hooks together while the host is starting the plugin.
+            registerAlbumHook(session, retry = false)
+        } else {
+            showNativeUnavailable(unavailable)
+        }
+        observeConfig(session)
+    }
+
+    private fun dispatch(session: Session, action: () -> Unit) {
         SwingUtilities.invokeLater {
-            if (activeSession === session && usePopup) {
-                val listener = CueFollow { cue ->
-                    if (activeSession === session) showFollowedCue(session, cue)
-                }
-                follow = listener
-                PlaybackProbe.mediaChanged = listener::signal
-                listener.signal()
+            synchronized(this) {
+                if (activeSession === session) action()
             }
         }
     }
 
-    private fun registerTaskbarTitle(session: Any, playback: NativeMiniPlayerCue) {
+    private fun canReadLibrary(): Boolean =
+        WorkshopApi.manager.isPermissionGranted(PluginPermission.LIBRARY_READ)
+
+    private fun nativeUnavailableReason(): String? = when {
+        !canTryNativeUi() -> "当前宿主未启用原生接入"
+        !canReadLibrary() -> "未授予曲库读取权限"
+        !WorkshopApi.manager.isPermissionGranted(PluginPermission.CLASS_TRANSFORM) ->
+            "未授予方法与 UI Hook 权限"
+        else -> null
+    }
+
+    private fun prepareNativeUi(session: Session) {
+        nativeUnavailableReason()?.let { reason ->
+            showNativeUnavailable(reason)
+            startPopupFallback(session)
+            return
+        }
+        if (!session.configReady || session.preparingNativeUi || nativeIndexReady) return
+        session.preparingNativeUi = true
+        session.scope.launch {
+            val failure = try {
+                runInterruptible { HostCatalog.prepare() }
+                null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                "宿主索引准备失败：${error.javaClass.simpleName}"
+            } catch (error: LinkageError) {
+                "宿主接口不兼容：${error.javaClass.simpleName}"
+            }
+            dispatch(session) {
+                session.preparingNativeUi = false
+                val reason = nativeUnavailableReason() ?: failure
+                if (reason == null) {
+                    nativeIndexReady = true
+                    if (albumHook == null) registerAlbumHook(session, retry = false)
+                    registerSongs(session)
+                    registerPlaybackCover(session)
+                    registerMiniPlayer(session)
+                } else {
+                    showNativeUnavailable(reason)
+                }
+                startPopupFallback(session)
+            }
+        }
+    }
+
+    private fun showNativeUnavailable(reason: String) {
+        albumHookStatus = reason
+        albumStatisticsStatus = reason
+        playbackCoverStatus = reason
+        miniPlayerStatus = reason
+        songDiagnostics.registration = reason
+    }
+
+    private fun registerMiniPlayer(session: Session) {
+        miniPlayerStatus = try {
+            miniPlayerCue = NativeMiniPlayerCue({ activeSession === session }) { status ->
+                if (activeSession === session) miniPlayerStatus = status
+            }
+            miniPlayerStatus
+        } catch (error: Exception) {
+            "注册失败：${error.cause?.message ?: error.message ?: error.javaClass.simpleName}"
+        } catch (error: LinkageError) {
+            "宿主接口不兼容：${error.javaClass.simpleName}"
+        }
+        miniPlayerCue?.let { registerTaskbarTitle(session, it) }
+    }
+
+    private fun startPopupFallback(session: Session) {
+        if (albumHook != null || follow != null || !canReadLibrary()) return
+        val listener = CueFollow({ activeSession === session && canReadLibrary() }) { cue ->
+            synchronized(this) {
+                if (activeSession === session) showFollowedCue(session, cue)
+            }
+        }
+        follow = listener
+        PlaybackProbe.mediaChanged = listener::signal
+        listener.signal()
+    }
+
+    private fun registerTaskbarTitle(session: Session, playback: NativeMiniPlayerCue) {
         taskbarStatus = "等待宿主主窗口"
         try {
             taskbarCue = NativeTaskbarCue(playback, { activeSession === session }) { status ->
@@ -126,52 +222,88 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     }
 
     @OptIn(UnstableSpwWorkshopApi::class)
-    private fun observeConfig(session: Any) {
-        try {
-            val manager = WorkshopApi.manager.createConfigManager()
-            val config = manager.getConfig("config.json")
-            songVisibility = runCatching {
-                // Workshop builds expose the same configuration location as either a File or a Path.
-                val location = ConfigHelper::class.java.getMethod("getConfigPath").invoke(config)
-                val path = when (location) {
-                    is Path -> location
-                    is File -> location.toPath()
-                    else -> error("无法定位插件配置目录")
+    private fun observeConfig(session: Session) {
+        session.scope.launch {
+            try {
+                val (manager, config) = runInterruptible {
+                    val manager = WorkshopApi.manager.createConfigManager()
+                    manager to manager.getConfig("config.json")
                 }
-                SongVisibility(path.toAbsolutePath().resolveSibling("song-visibility.txt"))
-            }.getOrNull().also(CueRemoval::bind)
-            val listener = Consumer<ConfigHelper> { helper ->
-                if (activeSession === session) {
+                dispatch(session) {
                     try {
-                        helper.reload()
-                        hideWholeTrack.value = helper.get("hideWholeTrack", false)
-                        showCueSongs.value = helper.get("showCueSongs", true)
-                    } catch (_: Exception) {
-                        hideWholeTrack.value = false
-                        showCueSongs.value = false
+                        val listener = Consumer<ConfigHelper> { session.configChanges.trySend(it) }
+                        manager.addConfigChangeListener("config.json", listener)
+                        configSubscription = AutoCloseable { manager.removeConfigChangeListener(listener) }
+                    } catch (error: Exception) {
+                        albumHookStatus = "配置监听失败：${error.javaClass.simpleName}"
+                    } catch (error: LinkageError) {
+                        albumHookStatus = "配置监听不兼容：${error.javaClass.simpleName}"
                     }
-                    songPage?.setAutomatic(showCueSongs.value)
+                    session.configChanges.trySend(config)
+                }
+
+                var initial = true
+                for (helper in session.configChanges) {
+                    val visibility = if (initial) try {
+                        runInterruptible {
+                            SongVisibility(helper.getConfigPath().toAbsolutePath().resolveSibling("song-visibility.txt"))
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        null
+                    } else null
+                    val (hide, show) = try {
+                        runInterruptible {
+                            helper.reload()
+                            helper.get("hideWholeTrack", false) to helper.get("showCueSongs", true)
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        false to false
+                    }
+                    val initialize = initial
+                    initial = false
+                    dispatch(session) {
+                        hideWholeTrack.value = hide
+                        showCueSongs.value = show
+                        if (initialize) {
+                            songVisibility = visibility
+                            CueRemoval.bind(visibility)
+                            session.configReady = true
+                            prepareNativeUi(session)
+                        } else {
+                            songPage?.setAutomatic(show)
+                        }
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                dispatch(session) {
+                    session.configReady = true
+                    prepareNativeUi(session)
+                }
+            } catch (_: LinkageError) {
+                dispatch(session) {
+                    session.configReady = true
+                    prepareNativeUi(session)
                 }
             }
-            manager.addConfigChangeListener("config.json", listener)
-            configSubscription = AutoCloseable { manager.removeConfigChangeListener(listener) }
-            listener.accept(config)
-        } catch (_: Exception) {
-            hideWholeTrack.value = false
-            showCueSongs.value = false
         }
     }
 
     @OptIn(UnstableSpwWorkshopApi::class)
     @Synchronized
-    private fun registerAlbumHook(session: Any, retry: Boolean) {
+    private fun registerAlbumHook(session: Session, retry: Boolean) {
         if (activeSession !== session) return
-        if (!canTryNativeUi()) {
-            albumHookStatus = "当前宿主未启用原生接入"
+        nativeUnavailableReason()?.let { reason ->
+            albumHookStatus = reason
             return
         }
-        if (!WorkshopApi.manager.isPermissionGranted(PluginPermission.CLASS_TRANSFORM)) {
-            albumHookStatus = "未授予方法与 UI Hook 权限"
+        if (retry && !nativeIndexReady && albumHook == null) {
+            prepareNativeUi(session)
             return
         }
         albumHookStatus = try {
@@ -182,7 +314,9 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             }
             albumPageStatus = "尚未收到专辑页回调"
             val target = AlbumHookTarget.resolve()
-            val content = NativeAlbumCue(target, { activeSession === session }, { hideWholeTrack.value }) { status ->
+            val content = NativeAlbumCue(
+                target, { activeSession === session }, { hideWholeTrack.value }, session.scope
+            ) { status ->
                 if (activeSession === session) albumPageStatus = status
             }
             val builder = target.listBuilder
@@ -196,13 +330,15 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                 after { content.afterList(it) }
             }
             albumCoverStatus = "未识别到专辑封面入口"
+            albumStatisticsStatus = "沿用原生计数"
             albumCoverHook = target.cover?.let { cover ->
                 try {
                     cover.install(
                         active = { activeSession === session },
-                        trackId = { target.singleTrackIn(it)?.id },
+                        trackIds = { groups -> target.trackGroupsIn(groups).map { disc -> disc.map { it.id } } },
                         artwork = { content.artwork },
-                        report = { if (activeSession === session) albumCoverStatus = it }
+                        report = { if (activeSession === session) albumCoverStatus = it },
+                        reportStatistics = { if (activeSession === session) albumStatisticsStatus = it }
                     ).also { albumCoverStatus = "已注册，等待专辑页绘制" }
                 } catch (error: Exception) {
                     albumCoverStatus = "注册失败：${error.message ?: error.javaClass.simpleName}"
@@ -240,7 +376,8 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                     null
                 }
             }
-            if (retry) "启动后重新注册成功，请退出专辑详情再进入" else "启动时已提交原生专辑页 Hook 注册"
+            stopPopupFallback()
+            if (retry) "重新注册成功，请退出专辑详情再进入" else "已提交原生专辑页 Hook"
         } catch (error: Exception) {
             "专辑页注册失败：${error.message ?: error.javaClass.simpleName}"
         } catch (error: LinkageError) {
@@ -257,7 +394,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         songCoverHook = null
     }
 
-    private fun registerPlaybackCover(session: Any) {
+    private fun registerPlaybackCover(session: Session) {
         playbackCoverStatus = when {
             !canTryNativeUi() ->
                 "当前宿主未启用原生接入"
@@ -280,12 +417,13 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     }
 
     @OptIn(UnstableSpwWorkshopApi::class)
-    private fun registerSongs(session: Any) {
+    @Synchronized
+    private fun registerSongs(session: Session) {
         if (activeSession !== session || songPageHook != null) return
-        if (!canTryNativeUi() || pluginContext.spwVersion != "1.19.3" ||
-            !WorkshopApi.manager.isPermissionGranted(PluginPermission.CLASS_TRANSFORM)
-        ) {
-            songDiagnostics.registration = "需要受支持的 1.19.3 宿主和方法与 UI Hook 权限"
+        val unavailable = nativeUnavailableReason()
+        if (unavailable != null || pluginContext.spwVersion != "1.19.3" || !nativeIndexReady) {
+            songDiagnostics.registration = unavailable ?: if (pluginContext.spwVersion != "1.19.3")
+                "需要受支持的 1.19.3 宿主" else "正在准备宿主索引"
             return
         }
         val diagnostics = SongPageDiagnostics()
@@ -306,13 +444,13 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         }
     }
 
-    private fun diagnoseSongs(session: Any, onUpdated: () -> Unit) {
+    private fun diagnoseSongs(session: Session, onUpdated: () -> Unit) {
         if (activeSession !== session) return
         registerSongs(session)
         songPage?.startDiagnostics(onUpdated)
     }
 
-    private fun mountSongs(session: Any) {
+    private fun mountSongs(session: Session) {
         if (activeSession !== session) return
         val candidate = songPage ?: return
         try {
@@ -325,13 +463,13 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         }
     }
 
-    private fun windowFor(session: Any): ProbeWindow =
+    private fun windowFor(session: Session): ProbeWindow =
         window?.takeIf { it.isDisplayable } ?: ProbeWindow(
             pluginContext.pluginVersion,
             "${pluginContext.spwVersion} / ${pluginContext.spwChannel} / ${System.getProperty("os.name")}",
             albumStatus = {
                 val taskbar = taskbarStatus?.let { "\n任务栏  $it" }.orEmpty()
-                "注册  $albumHookStatus\n页面  $albumPageStatus\n封面  $albumCoverStatus\n专辑卡片  $gridCoverStatus\n歌曲封面  $songCoverStatus\n播放封面  $playbackCoverStatus\n播控条  $miniPlayerStatus$taskbar"
+                "注册  $albumHookStatus\n页面  $albumPageStatus\n专辑统计  $albumStatisticsStatus\n封面  $albumCoverStatus\n专辑卡片  $gridCoverStatus\n歌曲封面  $songCoverStatus\n播放封面  $playbackCoverStatus\n播控条  $miniPlayerStatus$taskbar"
             },
             retryAlbumHook = { registerAlbumHook(session, retry = true) },
             songReport = { songDiagnostics.report() },
@@ -339,13 +477,14 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             mountSongs = { mountSongs(session) },
             hiddenSongs = songVisibility?.hidden,
             restoreHiddenSongs = { if (activeSession === session) songPage?.restoreHiddenSongs() },
+            canReadLibrary = ::canReadLibrary,
             active = { activeSession === session }
         ).also {
             window = it
             windowPinned = false
         }
 
-    private fun showFollowedCue(session: Any, cue: FollowedCue?) {
+    private fun showFollowedCue(session: Session, cue: FollowedCue?) {
         if (cue != null) {
             val current = windowFor(session)
             current.showAutomatic(cue)
@@ -359,10 +498,24 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         }
     }
 
+    private fun stopPopupFallback() {
+        PlaybackProbe.mediaChanged = null
+        val stoppedFollow = follow
+        follow = null
+        if (stoppedFollow != null) SwingUtilities.invokeLater { stoppedFollow.close() }
+    }
+
     @Synchronized
     override fun stop() {
+        val session = activeSession ?: return
         activeSession = null
-        PlaybackProbe.mediaChanged = null
+        nativeIndexReady = false
+        session.scope.cancel()
+        stopPopupFallback()
+        val stoppedWindow = window
+        window = null
+        windowPinned = false
+        SwingUtilities.invokeLater { stoppedWindow?.dispose() }
         runCatching { songPageHook?.close() }
         songPageHook = null
         songPage = null
@@ -387,15 +540,9 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             runCatching { configSubscription?.close() }
             configSubscription = null
             hideWholeTrack.value = false
-            showCueSongs.value = false
+            showCueSongs.value = true
             albumHook = null
             shortcut = null
-            SwingUtilities.invokeLater {
-                follow?.close()
-                follow = null
-                window?.dispose()
-                window = null
-            }
         }
     }
 }

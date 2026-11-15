@@ -29,7 +29,10 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
         return delegate(method, arguments)
     }
 
-    fun apply(hideWholeTrack: Boolean, appendCue: (Boolean) -> Boolean) {
+    fun apply(
+        hideWholeTrack: Boolean,
+        appendCue: (Boolean) -> Boolean
+    ) {
         recording = false
         var wholeTrack: Entry? = null
         try {
@@ -46,6 +49,71 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
             }
         } finally {
             entries.clear()
+        }
+    }
+
+    fun applyByTrack(
+        expectedIds: List<String>,
+        hiddenIds: Set<String>,
+        append: (String, Boolean) -> Unit,
+        appendFallback: () -> Unit
+    ) {
+        recording = false
+        try {
+            val idsByEntry = entries.map { entry ->
+                val count = entry.args.firstOrNull() as? Int
+                if (entry.args.size != 6 || count == null || count !in 1..expectedIds.size) {
+                    emptyList()
+                } else {
+                    val key = entry.args[1] as? Function1<*, *>
+                    @Suppress("UNCHECKED_CAST")
+                    runCatching {
+                        List(count) { (key as? (Int) -> Any?)?.invoke(it) as? String ?: "" }
+                    }.getOrDefault(emptyList())
+                }
+            }
+            val recordedIds = idsByEntry.flatten()
+            val matched = expectedIds.distinct().size == expectedIds.size && recordedIds == expectedIds
+            for ((index, entry) in entries.withIndex()) {
+                if (entry.footer && !matched) appendFallback()
+                val ids = idsByEntry[index].takeIf { matched }.orEmpty()
+                val shown = ids.indices.filter { ids[it] !in hiddenIds }
+                val hide = shown.size < ids.size
+                val args = when {
+                    !hide -> entry.args
+                    shown.isEmpty() -> null
+                    else -> subsetArgs(entry.args, shown)
+                }
+                val applied = hide && (shown.isEmpty() || args != null)
+                if (args != null || !applied) delegate(entry.method, args ?: entry.args)
+                ids.forEach { id -> append(id, applied && id in hiddenIds) }
+            }
+        } finally {
+            entries.clear()
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun subsetArgs(args: Array<out Any?>, shown: List<Int>): Array<Any?>? {
+        val content = args.last()
+        if (content != null && content !is Function4<*, *, *, *, *>) return null
+        if (args.dropLast(1).any { it is Function<*> && it !is Function1<*, *> }) return null
+        val nativeRow = content as? (@Composable (Any, Int) -> Unit)
+        val remappedRow: @Composable (Any, Int) -> Unit = { scope, index ->
+            nativeRow?.invoke(scope, shown[index])
+        }
+        return Array(args.size) { index ->
+            val arg = args[index]
+            when {
+                index == 0 -> shown.size
+                index == args.lastIndex && nativeRow != null -> remappedRow
+                arg is Function1<*, *> -> {
+                    val callback = arg as (Int) -> Any?
+                    val remapped: (Int) -> Any? = { callback(shown[it]) }
+                    remapped
+                }
+                else -> arg
+            }
         }
     }
 

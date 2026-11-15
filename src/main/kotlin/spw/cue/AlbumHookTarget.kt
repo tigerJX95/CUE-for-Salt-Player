@@ -18,16 +18,18 @@ internal class AlbumHookTarget(
 ) {
     data class Track(val id: String, val entity: Any)
 
-    fun singleTrack(args: Array<Any?>): Track? {
-        if (!albumDecorator.isInstance(args.getOrNull(2)) || args.getOrNull(1) != false) return null
-        return singleTrackIn(args.firstOrNull() as? List<*> ?: return null)
+    fun albumTracks(args: Array<Any?>): List<Track> {
+        if (!albumDecorator.isInstance(args.getOrNull(2)) || args.getOrNull(1) != false) return emptyList()
+        return trackGroupsIn(args.firstOrNull() as? List<*> ?: return emptyList()).flatten()
     }
 
-    fun singleTrackIn(groups: List<*>): Track? {
-        val tracks = groups.asSequence().filterNotNull()
-            .flatMap { (entities.get(it) as? List<*>)?.asSequence() ?: emptySequence() }
-            .take(2).toList()
-        val track = tracks.singleOrNull() ?: return null
+    fun trackGroupsIn(groups: List<*>): List<List<Track>> = groups.filterNotNull().mapNotNull { group ->
+        val rows = entities.get(group) as? List<*> ?: return emptyList()
+        if (rows.isEmpty()) return@mapNotNull null
+        rows.map { row -> readTrack(row ?: return emptyList()) ?: return emptyList() }
+    }
+
+    private fun readTrack(track: Any): Track? {
         val id = (trackId.invoke(track) as? String)?.takeIf { it.isNotBlank() } ?: return null
         return Track(id, track)
     }

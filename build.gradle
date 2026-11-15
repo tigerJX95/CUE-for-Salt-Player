@@ -5,7 +5,7 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.compose' version '2.4.20'
 }
 
-version = '0.2.0'
+version = '0.3.0'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -26,7 +26,8 @@ dependencies {
     compileOnly workshopApi
     compileOnly pf4j
     compileOnly kotlinStdlib
-    testCompileOnly('androidx.compose.runtime:runtime-desktop:1.12.0') { transitive = false }
+    testImplementation 'androidx.compose.runtime:runtime-desktop:1.12.0'
+    testRuntimeOnly 'org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2'
     testImplementation workshopApi
     testImplementation pf4j
     testImplementation kotlinStdlib

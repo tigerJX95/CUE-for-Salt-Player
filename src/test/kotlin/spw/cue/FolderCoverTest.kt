@@ -28,6 +28,30 @@ class FolderCoverTest {
         assertTrue(Color(checkNotNull(FolderCover.load(audio)).getRGB(0, 0)).red >= 253)
     }
 
+    @Test fun prefersSharedAlbumArtworkThenUsesTheDiscFoldersInHostOrder() {
+        val album = temp.newFolder("Album")
+        val cd1 = album.resolve("CD1").apply { mkdir() }
+        val cd2 = album.resolve("CD2").apply { mkdir() }
+        val files = listOf(cd1, cd2).map { it.resolve("disc.wav").toPath() }
+        val shared = album.resolve("folder.png")
+        writeImage(shared, "png", Color.RED)
+        writeImage(cd2.resolve("cover.png"), "png", Color.BLUE)
+
+        assertEquals(Color.RED.rgb, FolderCover.loadMultiDisc(files)?.getRGB(0, 0))
+        shared.delete()
+        assertEquals(Color.BLUE.rgb, FolderCover.loadMultiDisc(files)?.getRGB(0, 0))
+        writeImage(cd1.resolve("cover.png"), "png", Color.GREEN)
+        assertEquals(Color.GREEN.rgb, FolderCover.loadMultiDisc(files)?.getRGB(0, 0))
+    }
+
+    @Test fun doesNotUseArtworkAboveUnrelatedDiscFolders() {
+        val other = temp.newFolder("Other", "CD2")
+        val first = temp.newFolder("Album", "CD1")
+        writeImage(temp.root.resolve("cover.png"), "png", Color.RED)
+
+        assertNull(FolderCover.loadMultiDisc(listOf(first, other).map { it.resolve("disc.wav").toPath() }))
+    }
+
     @Test fun downsamplesLargeCoversBeforeDisplayingThem() {
         val cover = temp.newFile("cover.png")
         ImageIO.write(BufferedImage(2048, 1024, BufferedImage.TYPE_INT_RGB), "png", cover)

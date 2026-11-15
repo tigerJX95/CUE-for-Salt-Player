@@ -10,7 +10,9 @@ import javax.swing.Timer
 
 internal data class FollowedCue(val file: Path, val result: ProbeResult)
 
-internal class CueFollow(private val changed: (FollowedCue?) -> Unit) : AutoCloseable {
+internal class CueFollow(
+    private val active: () -> Boolean = { true }, private val changed: (FollowedCue?) -> Unit
+) : AutoCloseable {
     private var closed = false
     private var pending = false
     private var worker: SwingWorker<Update, Void>? = null
@@ -21,11 +23,12 @@ internal class CueFollow(private val changed: (FollowedCue?) -> Unit) : AutoClos
 
     fun signal() {
         SwingUtilities.invokeLater {
-            if (!closed) debounce.restart()
+            if (!closed && active()) debounce.restart()
         }
     }
 
     private fun refresh() {
+        if (closed || !active()) return
         val last = previous
         worker = object : SwingWorker<Update, Void>() {
             override fun doInBackground(): Update {
@@ -37,7 +40,7 @@ internal class CueFollow(private val changed: (FollowedCue?) -> Unit) : AutoClos
             }
 
             override fun done() {
-                if (closed) return
+                if (closed || !active()) return
                 worker = null
                 val update = try {
                     get()

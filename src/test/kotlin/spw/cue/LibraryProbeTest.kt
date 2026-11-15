@@ -2,10 +2,13 @@ package spw.cue
 
 import com.xuncorp.spw.workshop.api.PlaybackExtensionPoint.MediaItem
 import com.xuncorp.spw.workshop.api.WorkshopApi
+import com.xuncorp.spw.workshop.api.PluginPermission
+import com.xuncorp.spw.workshop.api.PluginPermissionDeniedException
 import com.xuncorp.spw.workshop.api.hook.HookRegistrar
 import java.nio.file.Path
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
@@ -17,6 +20,31 @@ import org.junit.rules.TemporaryFolder
 
 class LibraryProbeTest {
     @get:Rule val temp = TemporaryFolder()
+
+    @Test fun previewsManualCueWithoutRequestingLibraryAccess() {
+        val file = temp.newFile("preview.cue").apply {
+            writeText("FILE preview.wav WAVE\nTRACK 01 AUDIO\nTITLE First\nINDEX 01 00:00:00")
+        }.toPath()
+        val host = Host(null).apply { afterRead = { error("Unexpected playback access") } }
+        WorkshopApi.instance = host
+
+        val preview = LibraryProbe.inspect(file, readLibrary = false)
+        assertEquals("First", preview.sheet.tracks.single().title)
+        assertEquals(emptyMap<Path, MediaItem>(), preview.matches)
+        assertEquals(null, preview.current)
+    }
+
+    @Test fun keepsManualPreviewWhenLibraryPermissionIsRevokedDuringLookup() {
+        val file = temp.newFile("preview.cue").apply {
+            writeText("FILE preview.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00")
+        }.toPath()
+        val failure = PluginPermissionDeniedException("spw.cue.support", PluginPermission.LIBRARY_READ)
+        WorkshopApi.instance = Host(null).apply { afterRead = { throw CompletionException(failure) } }
+
+        val preview = LibraryProbe.inspect(file)
+        assertEquals(1, preview.sheet.tracks.size)
+        assertEquals(emptyMap<Path, MediaItem>(), preview.matches)
+    }
 
     @Test fun matchesByPathAcrossPagesWithoutRequiringTheAudioFile() {
         val fixture = temp.newFile("set.cue").apply {
@@ -176,6 +204,56 @@ class LibraryProbeTest {
         val remote = assertThrows(IllegalStateException::class.java) { LibraryProbe.findAlbumCue("remote") }
         assertEquals("公开曲库未找到对应整轨", missing.message)
         assertEquals("公开曲库未返回可用的本地文件路径", remote.message)
+    }
+
+    @Test fun resolvesSeparateDiscFoldersInHostOrderAndSkipsUnmatchedSources() {
+        val root = temp.root.toPath()
+        val disc1 = temp.newFolder("CD1").toPath()
+        val disc2 = temp.newFolder("CD2").toPath()
+        for (disc in listOf(disc1, disc2)) {
+            disc.resolve("image.cue").toFile().writeText(
+                "FILE image.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00"
+            )
+        }
+        val first = item(disc1.resolve("image.wav"), "1").copy(duration = 31_000)
+        val second = item(disc2.resolve("image.wav"), "2").copy(duration = 44_000)
+        val bonus = item(root.resolve("bonus.wav"), "bonus")
+        val fake = Host(first, listOf(first, second, bonus))
+        WorkshopApi.instance = fake
+
+        val cues = LibraryProbe.findAlbumCueSources(listOf("2", "absent", "1", "bonus")) { true }
+
+        assertEquals(listOf("2", "1"), cues.map { it.trackId })
+        assertEquals(listOf(disc2.resolve("image.wav"), disc1.resolve("image.wav")), cues.map { it.audio })
+        assertEquals(listOf("00:44", "00:31"), cues.map { it.cue.trackDurationLabels.single() })
+        assertEquals(listOf("2", "absent", "1", "bonus"), fake.queriedIds)
+    }
+
+    @Test fun mapsMultiFileCueTracksToTheirOwnSourceAndPlaybackOffset() {
+        val cue = temp.newFile("set.cue")
+        cue.writeText("""
+            FILE disc1.wav WAVE
+            TRACK 01 AUDIO
+            INDEX 01 00:00:00
+            FILE disc2.wav WAVE
+            TRACK 02 AUDIO
+            INDEX 01 00:03:00
+        """.trimIndent())
+        val root = cue.toPath().parent
+        val first = item(root.resolve("disc1.wav"), "1")
+        val second = item(root.resolve("disc2.wav"), "2")
+        WorkshopApi.instance = Host(first, listOf(first, second))
+
+        val cues = LibraryProbe.findAlbumCueSources(listOf("1", "2")) { true }
+
+        assertEquals(listOf(1, 2), cues.map { it.cue.tracks.single().number })
+        assertEquals(listOf(0L, 3_000L), cues.map { it.cue.tracks.single().startMs })
+        val (_, _, album) = cues.last()
+        val requests = mutableListOf<Pair<Long, Boolean>>()
+        LibraryProbe.playAlbumTrack(album.tracks.single(), album.durationMs, { true }) { position, switch ->
+            requests.add(position to switch)
+        }
+        assertEquals(listOf(3_000L to true), requests)
     }
 
     private fun item(path: Path, id: String) =

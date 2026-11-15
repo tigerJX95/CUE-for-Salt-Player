@@ -29,6 +29,7 @@ internal class ProbeWindow(
     private val mountSongs: () -> Unit,
     private val hiddenSongs: StateFlow<Set<String>>?,
     private val restoreHiddenSongs: () -> Unit,
+    private val canReadLibrary: () -> Boolean,
     private val active: () -> Boolean
 ) : JFrame("CUE 分轨 · CUE for Salt Player") {
     private var report by mutableStateOf("")
@@ -130,7 +131,11 @@ internal class ProbeWindow(
     }
 
     private fun discoverCurrent() {
-        if (worker != null) return
+        if (worker != null || !active()) return
+        if (!canReadLibrary()) {
+            status = "查找当前音频需要曲库读取权限，可手动打开 CUE 预览。"
+            return
+        }
         clearResult("正在查找当前音频的外置或内嵌 CUE…")
         runTask({
             val current = LibraryProbe.current()
@@ -194,8 +199,8 @@ internal class ProbeWindow(
         cancelWork()
         showingDiagnostics = false
         apiReport = null
-        clearResult("正在解析 CUE 并匹配曲库…")
-        runTask({ LibraryProbe.inspect(file) }) { inspected ->
+        clearResult("正在解析 CUE…")
+        runTask({ LibraryProbe.inspect(file, readLibrary = canReadLibrary()) }) { inspected ->
             showResult(file, inspected, "已打开")
         }
     }
@@ -215,7 +220,11 @@ internal class ProbeWindow(
         report = buildString {
             appendLine("CUE  ${file.fileName}  ·  ${data.sheet.encoding}  ·  ${data.sheet.title.orEmpty()}")
             appendLine("当前播放  ${data.current?.path ?: "无"}")
-            appendLine("曲库匹配  ${data.matches.size} / ${data.sheet.tracks.map { it.audio }.distinct().size} 个音频文件")
+            if (canReadLibrary()) {
+                appendLine("曲库匹配  ${data.matches.size} / ${data.sheet.tracks.map { it.audio }.distinct().size} 个音频文件")
+            } else {
+                appendLine("未授予曲库读取权限 · 仅显示 CUE 内容")
+            }
             appendLine()
             for (track in data.sheet.tracks) {
                 val match = data.matches[track.audio]
@@ -232,6 +241,7 @@ internal class ProbeWindow(
         }
         selectedRow = data.sheet.tracks.indexOfFirst { LibraryProbe.canSeek(it, data.current) }
         status = "$action ${data.sheet.tracks.size} 轨" + when {
+            !canReadLibrary() -> " · 曲库匹配与定位需要曲库读取权限"
             data.current == null -> " · 当前无播放项"
             selectedRow < 0 -> " · 当前播放项无可定位分轨"
             else -> " · 双击可定位到当前整轨中的分轨"
@@ -241,7 +251,7 @@ internal class ProbeWindow(
     private fun canSeekSelected(): Boolean {
         val data = result ?: return false
         val track = data.sheet.tracks.getOrNull(selectedRow) ?: return false
-        return worker == null && track.audio in data.matches && LibraryProbe.canSeek(track, data.current)
+        return canReadLibrary() && worker == null && track.audio in data.matches && LibraryProbe.canSeek(track, data.current)
     }
 
     private fun seekSelected() {
@@ -273,7 +283,8 @@ internal class ProbeWindow(
                         completed(get())
                     } catch (error: ExecutionException) {
                         val cause = error.cause ?: error
-                        status = "操作失败：${cause.message ?: cause.javaClass.simpleName}"
+                        status = if (cause.isLibraryPermissionDenied()) "未授予曲库读取权限，可手动打开 CUE 预览。"
+                        else "操作失败：${cause.message ?: cause.javaClass.simpleName}"
                     }
                 }
             }

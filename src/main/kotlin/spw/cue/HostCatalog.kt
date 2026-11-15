@@ -34,6 +34,8 @@ internal object HostCatalog {
     )
     private val index by lazy { scan() }
 
+    fun prepare() { index.size }
+
     private val models = object : ClassValue<ClassModel>() {
         override fun computeValue(type: Class<*>): ClassModel {
             val internal = type.name.replace('.', '/')
@@ -115,7 +117,7 @@ internal object HostCatalog {
     }
 
     // Bind data-class accessors by the constructor's argument slots and the fields they write.
-    fun accessors(constructor: Constructor<*>): List<Method> {
+    fun accessors(constructor: Constructor<*>, select: (Method) -> Boolean = { true }): List<Method> {
         val owner = constructor.declaringClass
         val internal = owner.name.replace('.', '/')
         val parameters = constructor.parameterTypes
@@ -131,7 +133,7 @@ internal object HostCatalog {
             }.single()
             slot += if (parameter == Long::class.javaPrimitiveType || parameter == Double::class.javaPrimitiveType) 2 else 1
             owner.declaredMethods.single { candidate ->
-                if (!Modifier.isPublic(candidate.modifiers) || Modifier.isStatic(candidate.modifiers) ||
+                if (!select(candidate) || !Modifier.isPublic(candidate.modifiers) || Modifier.isStatic(candidate.modifiers) ||
                     candidate.parameterCount != 0 || candidate.returnType != parameter
                 ) return@single false
                 val instructions = code(candidate).filterIsInstance<Instruction>()
@@ -157,6 +159,7 @@ internal object HostCatalog {
         var scannedBytes = 0L
         ZipFile(Path.of(location.toURI()).toFile()).use { zip ->
             for (entry in zip.entries()) {
+                if (Thread.currentThread().isInterrupted) throw InterruptedException()
                 val name = entry.name
                 if (!name.endsWith(".class") || entry.size !in 1..262_144 ||
                     !(name.startsWith("androidx/compose/ui/") && name.count { it == '/' } == 3 ||

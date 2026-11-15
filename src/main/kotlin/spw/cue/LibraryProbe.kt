@@ -1,10 +1,14 @@
 package spw.cue
 
 import com.xuncorp.spw.workshop.api.PlaybackExtensionPoint.MediaItem
+import com.xuncorp.spw.workshop.api.PluginPermission
+import com.xuncorp.spw.workshop.api.PluginPermissionDeniedException
 import com.xuncorp.spw.workshop.api.WorkshopApi
 import java.net.URI
 import java.net.URISyntaxException
 import java.nio.file.Path
+import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 
 internal data class ProbeResult(
@@ -21,8 +25,20 @@ internal data class AlbumCue(val tracks: List<CueTrack>, val durationMs: Long) {
     }
 }
 
+internal data class AlbumCueSource(val trackId: String, val audio: Path, val cue: AlbumCue)
+
 internal object LibraryProbe {
-    fun inspect(cue: Path): ProbeResult = inspect(CueParser.read(cue), current())
+    fun inspect(cue: Path, readLibrary: Boolean = true): ProbeResult {
+        val sheet = CueParser.read(cue)
+        val preview = ProbeResult(sheet, emptyMap(), null)
+        if (!readLibrary) return preview
+        return try {
+            inspect(sheet, current())
+        } catch (error: Exception) {
+            if (!error.isLibraryPermissionDenied()) throw error
+            preview
+        }
+    }
 
     fun current(): MediaItem? = WorkshopApi.playback.getCurrentMediaItem()
 
@@ -33,6 +49,28 @@ internal object LibraryProbe {
         val audio = checkNotNull(pathOf(item)) { "公开曲库未返回可用的本地文件路径" }
         val tracks = CueDiscovery.find(audio)?.sheet?.tracks?.filter { it.audio == audio }.orEmpty()
         return AlbumCue(tracks, item.duration)
+    }
+
+    fun findAlbumCueSources(trackIds: List<String>, active: () -> Boolean): List<AlbumCueSource> {
+        if (trackIds.isEmpty() || trackIds.toSet().size != trackIds.size) return emptyList()
+
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        val sources = trackIds.mapNotNull { id ->
+            if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
+            val remaining = deadline - System.nanoTime()
+            check(remaining > 0) { "读取专辑整轨超时" }
+            val item = WorkshopApi.library.getTrackById(id)
+                .toCompletableFuture().get(remaining, TimeUnit.NANOSECONDS)
+                ?.takeIf { it.id == id } ?: return@mapNotNull null
+            val audio = pathOf(item) ?: return@mapNotNull null
+            item to audio
+        }
+        val uniqueSources = sources.distinctBy { it.second }
+        val matches = CueDiscovery.findAll(uniqueSources.map { it.second }, active)
+        return uniqueSources.mapNotNull { (item, audio) ->
+            val tracks = matches[audio]?.sheet?.tracks?.filter { it.audio == audio }.orEmpty()
+            if (tracks.isEmpty()) null else AlbumCueSource(item.id, audio, AlbumCue(tracks, item.duration))
+        }
     }
 
     fun inspect(sheet: CueSheet, current: MediaItem?): ProbeResult {
@@ -108,4 +146,13 @@ internal object LibraryProbe {
     fun canSeek(track: CueTrack, current: MediaItem?): Boolean =
         current != null && current.id.isNotBlank() && track.audio == pathOf(current) &&
             track.startMs < current.duration
+}
+
+internal fun Throwable.isLibraryPermissionDenied(): Boolean {
+    var failure = this
+    while (failure is ExecutionException || failure is CompletionException) {
+        failure = failure.cause ?: return false
+    }
+    return failure is PluginPermissionDeniedException &&
+        failure.permission == PluginPermission.LIBRARY_READ
 }
