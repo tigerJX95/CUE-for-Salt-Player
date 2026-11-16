@@ -6,21 +6,18 @@ assignees: ["tigerJX95"]
 type: Bug
 
 body:
-  - type: dropdown
+  - type: checkboxes
     id: affected-platform
     attributes:
       label: 💻 受影响的平台与渠道 / Affected Platform and Channel
       description: |
-        请选择所有已确认能复现问题的平台与渠道，可多选。
+        请至少选择一个已确认能复现问题的平台与渠道。
 
-        Select all platforms and channels where you reproduced the issue.
-      multiple: true
+        Select at least one platform and channel where you reproduced the issue.
       options:
-        - Windows · 微软商店 / Windows · Microsoft Store
-        - Windows · Steam
-        - Linux · Steam
-    validations:
-      required: true
+        - label: Windows · 微软商店 / Windows · Microsoft Store
+        - label: Windows · Steam
+        - label: Linux · Steam
 
   - type: input
     id: player-version
