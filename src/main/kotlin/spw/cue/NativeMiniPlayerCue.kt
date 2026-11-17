@@ -102,6 +102,7 @@ internal class NativeMiniPlayerCue(
         status("跟踪当前分轨")
         scope.launch {
             host.current.collectLatest { item ->
+                CueAlbumSequence.sourceChanged(item?.let(::audioPath))
                 textBinding?.restoreVisibleLabels()
                 display.value = null
                 if (item != null && active()) {
@@ -141,12 +142,18 @@ internal class NativeMiniPlayerCue(
                 val position = host.position.invoke(progress) as Long
                 val duration = host.duration.invoke(progress) as Long
                 val current = cueTrackAt(match.tracks, position, duration) ?: return@before
-                val target = adjacentCueTrack(match.tracks, current, duration, step) ?: return@before
+                val target = adjacentCueTrack(match.tracks, current, duration, step)
                 if (host.current.value !== match.item) return@before
-                call.setResult(null)
+                if (target != null) call.setResult(null)
                 try {
-                    WorkshopApi.playback.seekTo(target.startMs)
-                    navigationStatus = "已跳转第 ${target.number} 轨"
+                    if (target != null) {
+                        WorkshopApi.playback.seekTo(target.startMs)
+                        navigationStatus = "已跳转第 ${target.number} 轨"
+                    } else {
+                        val crossed = CueAlbumSequence.step(current, step) ?: return@before
+                        call.setResult(null)
+                        navigationStatus = "已跨碟跳转至第 ${crossed.number} 轨"
+                    }
                     publishStatus()
                 } catch (error: Exception) {
                     status("分轨切换失败：${error.javaClass.simpleName}")
@@ -154,8 +161,10 @@ internal class NativeMiniPlayerCue(
             }
         }
 
+    private fun audioPath(item: Any) = LibraryProbe.localPath(host.path.invoke(item) as? String)
+
     private suspend fun follow(item: Any) {
-        val audio = LibraryProbe.localPath(host.path.invoke(item) as? String)
+        val audio = audioPath(item)
         if (audio == null) {
             status("当前播放路径不可用")
             return
@@ -365,6 +374,7 @@ internal class NativeMiniPlayerCue(
     }
 
     override fun close() {
+        CueAlbumSequence.clear()
         scope.cancel()
         EventQueue.invokeLater { textBinding?.restoreVisibleLabels() }
         for (hook in hooks.asReversed()) runCatching { hook.close() }

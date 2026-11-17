@@ -99,6 +99,14 @@ internal class SongPageDiagnostics {
     }
 
     @Synchronized
+    fun restored() {
+        publish = "已恢复原生歌曲页状态"
+        list = "等待原生列表绘制"
+        render = "没有可显示的 CUE 分轨"
+        canMount = false
+    }
+
+    @Synchronized
     fun published(count: Int) {
         publish = "已提交歌曲页计数 $count 首"
     }

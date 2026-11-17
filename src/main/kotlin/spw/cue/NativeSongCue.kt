@@ -105,6 +105,7 @@ internal class NativeSongCue(
     private data class Indexed(
         val sources: Map<Any, List<Any>>,
         val songs: Map<String, Song>,
+        val cues: Map<java.nio.file.Path, LocatedCue>,
         val pathCount: Int,
         val matchedSources: Int,
         val matchedTracks: Int
@@ -147,18 +148,30 @@ internal class NativeSongCue(
     private val pageState = MutableStateFlow<MutableStateFlow<Any>?>(null)
     private data class Publication(
         val flow: MutableStateFlow<Any>, val input: FilterInput, val hideWhole: Boolean,
-        val excluded: Set<String>, val value: Any
+        val excluded: Set<String>, val revision: Long, val value: Any
     )
     private val publishLock = Any()
+    private val refreshRevision = MutableStateFlow(0L)
+    private val pendingRefresh = mutableSetOf<String>()
     private var publication: Publication? = null
     private val previewScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var observedGroups = WeakReference<List<*>>(null)
     private val seekLock = Mutex()
     private val visibilityWrites = Dispatchers.IO.limitedParallelism(1)
 
-    fun restoreHiddenSongs() {
+    fun refreshAlbum(trackIds: List<String>) {
+        if (trackIds.isEmpty()) return
+        synchronized(publishLock) {
+            pendingRefresh.addAll(trackIds)
+            refreshRevision.value++
+        }
+    }
+
+    fun restoreHiddenSongs(entries: Set<String>?) {
         val store = visibility ?: return
-        changeVisibility(store::restoreAll)
+        changeVisibility {
+            if (entries == null) store.restoreAll() else store.restore(entries)
+        }
     }
 
     private fun changeVisibility(change: () -> Unit) {
@@ -402,31 +415,41 @@ internal class NativeSongCue(
     private suspend fun watchMount() {
         mount.flatMapLatest { request ->
             if (!request.enabled) emptyFlow() else pageState.filterNotNull().flatMapLatest { flow ->
-                combine(flow, latestInput, snapshotFlow(hideWholeTrack), visibility?.hidden ?: flowOf(emptySet())) {
-                        state, input, hideWhole, excluded ->
-                    if (input != null) mountCurrent(flow, state, input, hideWhole, excluded)
+                combine(
+                    flow, latestInput, snapshotFlow(hideWholeTrack), visibility?.hidden ?: flowOf(emptySet()), refreshRevision
+                ) { state, input, hideWhole, excluded, revision ->
+                    if (input != null) mountCurrent(flow, state, input, hideWhole, excluded, revision)
                 }
             }
         }.collect {}
     }
 
     private fun mountCurrent(
-        flow: MutableStateFlow<Any>, state: Any, input: FilterInput, hideWhole: Boolean, excluded: Set<String>
+        flow: MutableStateFlow<Any>, state: Any, input: FilterInput, hideWhole: Boolean, excluded: Set<String>,
+        revision: Long
     ) {
         val current = synchronized(publishLock) { publication }
         val ownsState = current?.flow === flow && current.value === state
-        if (ownsState && current.input === input && current.hideWhole == hideWhole && current.excluded == excluded) return
+        if (ownsState && current.input === input && current.hideWhole == hideWhole && current.excluded == excluded &&
+            current.revision == revision
+        ) return
         if (state != input.original && (!ownsState || current.input.original != input.original)) return
 
-        val projected = inspect(input, hideWhole, apply = true, cached = false, excluded) ?: return
+        val projected = inspect(input, hideWhole, apply = true, cached = false, excluded, revision, ownsState) ?: return
         synchronized(publishLock) {
             if (!active() || !mount.value.enabled || pageState.value !== flow || latestInput.value !== input ||
-                hideWholeTrack() != hideWhole || visibility?.hidden?.value.orEmpty() != excluded || flow.value !== state
+                hideWholeTrack() != hideWhole || visibility?.hidden?.value.orEmpty() != excluded || flow.value !== state ||
+                refreshRevision.value != revision
             ) return
             if (!flow.compareAndSet(state, projected)) return
+            if (projected === input.original) {
+                publication = null
+                diagnostics.restored()
+                return
+            }
             val actual = flow.value
             if (actual === projected || (ownsState && actual === state && state == projected)) {
-                publication = Publication(flow, input, hideWhole, excluded, actual)
+                publication = Publication(flow, input, hideWhole, excluded, revision, actual)
                 diagnostics.published(target.count(projected))
             }
         }
@@ -485,15 +508,25 @@ internal class NativeSongCue(
     @Synchronized
     private fun inspect(
         input: FilterInput, hide: Boolean, apply: Boolean, cached: Boolean,
-        excluded: Set<String> = visibility?.hidden?.value.orEmpty()
+        excluded: Set<String> = visibility?.hidden?.value.orEmpty(),
+        revision: Long = refreshRevision.value, ownsState: Boolean = false
     ): Any? {
         if (!active() || !diagnosing || latestInput.value !== input || mount.value.enabled != apply) return null
         return try {
             val entities = input.entities
             diagnostics.begin(entities.size, target.count(input.original), hide, input.query.isNotBlank(), cached, apply)
-            val library = index(entities)
+            val refreshIds = synchronized(publishLock) {
+                if (refreshRevision.value != revision) return null
+                pendingRefresh.toSet()
+            }
+            val library = index(entities, refreshIds)
+            synchronized(publishLock) {
+                if (refreshRevision.value != revision) return null
+                pendingRefresh.removeAll(refreshIds)
+            }
             diagnostics.scanned(library.pathCount, library.matchedSources, library.matchedTracks, library.songs.size)
-            if (library.songs.isEmpty() || !active()) return null
+            if (!active()) return null
+            if (library.songs.isEmpty()) return input.original.takeIf { ownsState }
             val expanded = buildList {
                 for (entity in entities.filterNotNull()) {
                     val split = library.sources[entity]
@@ -528,11 +561,17 @@ internal class NativeSongCue(
         }
     }
 
-    private fun index(entities: List<*>): Indexed {
-        if (indexed.get() === entities) indexedCues?.let { return it }
+    private fun index(entities: List<*>, refreshIds: Set<String>): Indexed {
+        val cached = indexedCues?.takeIf { indexed.get() === entities }
+        if (cached != null && refreshIds.isEmpty()) return cached
         val tracks = entities.filterNotNull()
         val paths = tracks.mapNotNull { entity -> target.audioPath(entity)?.let { entity to it } }.toMap()
-        val cues = CueDiscovery.findAll(paths.values, active)
+        val cues = if (cached == null) {
+            CueDiscovery.findAll(paths.values, active)
+        } else {
+            val refreshedPaths = paths.filterKeys { target.id(it) in refreshIds }.values.toSet()
+            CueDiscovery.refreshMatches(cached.cues, refreshedPaths, active)
+        }
         val originalIds = tracks.mapTo(HashSet(), target::id)
         val songs = mutableMapOf<String, Song>()
         val sources = mutableMapOf<Any, List<Any>>()
@@ -564,7 +603,7 @@ internal class NativeSongCue(
             }
             if (split.isNotEmpty()) sources[entity] = split
         }
-        return Indexed(sources, songs, paths.size, matchedSources, matchedTracks).also {
+        return Indexed(sources, songs, cues, paths.size, matchedSources, matchedTracks).also {
             indexed = WeakReference(entities)
             indexedCues = it
         }

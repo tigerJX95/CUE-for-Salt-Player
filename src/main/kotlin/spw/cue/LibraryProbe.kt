@@ -51,7 +51,20 @@ internal object LibraryProbe {
         return AlbumCue(tracks, item.duration)
     }
 
-    fun findAlbumCueSources(trackIds: List<String>, active: () -> Boolean): List<AlbumCueSource> {
+    fun findAlbumCueSources(trackIds: List<String>, active: () -> Boolean): List<AlbumCueSource> =
+        resolveAlbumCues(trackIds, active).map { (item, audio, sheet) ->
+            AlbumCueSource(item.id, audio, AlbumCue(sheet.tracks, item.duration))
+        }
+
+    fun inspectAlbum(trackIds: List<String>, active: () -> Boolean): ProbeResult {
+        val discs = resolveAlbumCues(trackIds, active)
+        val first = discs.firstOrNull()
+        val title = first?.first?.album?.takeIf { it.isNotBlank() } ?: first?.third?.title
+        val sheet = CueSheet("专辑 CUE", title, discs.flatMap { it.third.tracks })
+        return ProbeResult(sheet, discs.associate { (item, audio, _) -> audio to item }, current())
+    }
+
+    private fun resolveAlbumCues(trackIds: List<String>, active: () -> Boolean): List<Triple<MediaItem, Path, CueSheet>> {
         if (trackIds.isEmpty() || trackIds.toSet().size != trackIds.size) return emptyList()
 
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
@@ -68,8 +81,9 @@ internal object LibraryProbe {
         val uniqueSources = sources.distinctBy { it.second }
         val matches = CueDiscovery.findAll(uniqueSources.map { it.second }, active)
         return uniqueSources.mapNotNull { (item, audio) ->
-            val tracks = matches[audio]?.sheet?.tracks?.filter { it.audio == audio }.orEmpty()
-            if (tracks.isEmpty()) null else AlbumCueSource(item.id, audio, AlbumCue(tracks, item.duration))
+            val sheet = matches[audio]?.sheet ?: return@mapNotNull null
+            val tracks = sheet.tracks.filter { it.audio == audio }
+            if (tracks.isEmpty()) null else Triple(item, audio, sheet.copy(tracks = tracks))
         }
     }
 

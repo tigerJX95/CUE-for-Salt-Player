@@ -2,6 +2,13 @@
 
 [中文](CHANGELOG.md) | [English](CHANGELOG_EN.md)
 
+## v0.4.0
+
+- **Playback across discs.** After starting a CUE track in Album Details, Next at the end of a disc goes to the first track on the next disc, and Previous at the start goes to the last track on the previous disc. Playback can continue automatically to the next adjacent disc with CUE tracks.
+- **Refresh CUE.** Re-read an album’s CUE sheets from Album Details or Manage tracks. The track lists, Songs, and album count are recalculated. Songs shows the original audio entry again if its CUE match is lost.
+- **Scoped track restoration.** Restore the selected track, the current album’s affected tracks, or all tracks. The CUE window distinguishes tracks hidden from Songs from tracks removed from the library.
+- **CUE window.** Updated buttons, list styling, and selection colors, clarified the **Open CUE file…** button, and replaced the start and end columns with one centered duration column.
+
 ## v0.3.0 — 2026-11-15
 
 - **Multi-disc albums.** Supports a separate external CUE sheet for each disc or a single sheet with multiple `FILE` entries for audio files in the same folder. Album Details follows Salt Player’s disc order and shows CUE tracks directly after the corresponding full-length entry. Selecting a track loads the correct audio file and seeks to its start.

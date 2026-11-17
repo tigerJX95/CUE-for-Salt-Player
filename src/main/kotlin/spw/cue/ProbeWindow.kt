@@ -27,8 +27,9 @@ internal class ProbeWindow(
     private val songReport: () -> String,
     private val diagnoseSongs: (() -> Unit) -> Unit,
     private val mountSongs: () -> Unit,
-    private val hiddenSongs: StateFlow<Set<String>>?,
-    private val restoreHiddenSongs: () -> Unit,
+    private val visibility: () -> StateFlow<SongVisibilityRecords>?,
+    private val restoreHiddenSongs: (Set<String>?) -> Unit,
+    private val refreshAlbum: (List<String>) -> Unit,
     private val canReadLibrary: () -> Boolean,
     private val active: () -> Boolean
 ) : JFrame("CUE 分轨 · CUE for Salt Player") {
@@ -43,6 +44,7 @@ internal class ProbeWindow(
     private var seekTimer: Timer? = null
     private var seekReport by mutableStateOf("")
     private var cuePath by mutableStateOf<Path?>(null)
+    private var albumIds by mutableStateOf<List<String>?>(null)
     private var firstOpen = true
 
     init {
@@ -68,7 +70,8 @@ internal class ProbeWindow(
                     diagnostics = showingDiagnostics,
                     report = apiReport ?: listOf(report, seekReport).filter(String::isNotBlank).joinToString("\n\n"),
                     showingApi = apiReport != null,
-                    onDiscover = ::discoverCurrent,
+                    managingAlbum = albumIds != null,
+                    onDiscover = if (albumIds == null) ::discoverCurrent else ::refreshManagedAlbum,
                     onOpen = ::chooseFile,
                     onSelect = { selectedRow = it },
                     onPlay = { index ->
@@ -99,7 +102,7 @@ internal class ProbeWindow(
                         mountSongs()
                         apiReport = nativeReport()
                     },
-                    hiddenSongCount = hiddenSongs?.collectAsState()?.value?.size ?: 0,
+                    visibility = visibility()?.collectAsState()?.value ?: SongVisibilityRecords(),
                     onRestoreHiddenSongs = restoreHiddenSongs,
                     onSeek = ::seekSelected
                 )
@@ -118,6 +121,7 @@ internal class ProbeWindow(
 
     fun showAutomatic(cue: FollowedCue) {
         firstOpen = false
+        albumIds = null
         cancelWork()
         clearResult("")
         showResult(cue.file, cue.result, "已识别")
@@ -128,6 +132,36 @@ internal class ProbeWindow(
     fun clearAutomatic() {
         cancelWork()
         clearResult("当前播放项没有匹配的 CUE")
+    }
+
+    fun openAlbum(ids: List<String>) {
+        if (!active() || ids.isEmpty()) return
+        firstOpen = false
+        cancelWork()
+        albumIds = ids
+        showingDiagnostics = false
+        apiReport = null
+        discoverAlbum(ids)
+    }
+
+    private fun refreshManagedAlbum() {
+        val ids = albumIds ?: return
+        if (worker != null || !active() || !canReadLibrary()) return
+        refreshAlbum(ids)
+        discoverAlbum(ids)
+    }
+
+    private fun discoverAlbum(ids: List<String>) {
+        if (!canReadLibrary()) {
+            clearResult("读取专辑 CUE 需要曲库读取权限。")
+            return
+        }
+        cuePath = null
+        clearResult("正在读取当前专辑的 CUE…")
+        runTask({ LibraryProbe.inspectAlbum(ids, active) }) { inspected ->
+            if (inspected.sheet.tracks.isEmpty()) status = "当前专辑没有匹配的 CUE 分轨。"
+            else showResult(null, inspected, "已读取专辑")
+        }
     }
 
     private fun discoverCurrent() {
@@ -197,6 +231,7 @@ internal class ProbeWindow(
             return
         }
         cancelWork()
+        albumIds = null
         showingDiagnostics = false
         apiReport = null
         clearResult("正在解析 CUE…")
@@ -214,11 +249,11 @@ internal class ProbeWindow(
         status = message
     }
 
-    private fun showResult(file: Path, data: ProbeResult, action: String) {
+    private fun showResult(file: Path?, data: ProbeResult, action: String) {
         cuePath = file
         result = data
         report = buildString {
-            appendLine("CUE  ${file.fileName}  ·  ${data.sheet.encoding}  ·  ${data.sheet.title.orEmpty()}")
+            appendLine("CUE  ${file?.fileName ?: "当前专辑"}  ·  ${data.sheet.encoding}  ·  ${data.sheet.title.orEmpty()}")
             appendLine("当前播放  ${data.current?.path ?: "无"}")
             if (canReadLibrary()) {
                 appendLine("曲库匹配  ${data.matches.size} / ${data.sheet.tracks.map { it.audio }.distinct().size} 个音频文件")
@@ -243,7 +278,7 @@ internal class ProbeWindow(
         status = "$action ${data.sheet.tracks.size} 轨" + when {
             !canReadLibrary() -> " · 曲库匹配与定位需要曲库读取权限"
             data.current == null -> " · 当前无播放项"
-            selectedRow < 0 -> " · 当前播放项无可定位分轨"
+            selectedRow < 0 -> if (albumIds != null) " · 可管理专辑分轨" else " · 当前播放项无可定位分轨"
             else -> " · 双击可定位到当前整轨中的分轨"
         }
     }

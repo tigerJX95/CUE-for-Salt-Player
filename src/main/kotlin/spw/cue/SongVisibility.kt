@@ -11,6 +11,18 @@ import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 import java.util.HexFormat
 
+internal data class SongVisibilityRecords(
+    val hiddenInSongs: Set<String> = emptySet(),
+    val removedFromLibrary: Set<String> = emptySet()
+) {
+    fun label(key: String): String? = when {
+        key in hiddenInSongs && key in removedFromLibrary -> "已隐藏 · 已移除"
+        key in removedFromLibrary -> "已从曲库移除"
+        key in hiddenInSongs -> "已从歌曲页隐藏"
+        else -> null
+    }
+}
+
 internal class SongVisibility(private val path: Path) {
     private val removedPath = path.resolveSibling("removed-cue-tracks.txt")
     private var hiddenKeys = read(path)
@@ -22,6 +34,8 @@ internal class SongVisibility(private val path: Path) {
         emptySet()
     }
     val albumRemoved = CueRemoval.albumState(removedKeys)
+    private val records = MutableStateFlow(SongVisibilityRecords(hiddenKeys, removedKeys))
+    val recovery = records.asStateFlow()
     private val keys = MutableStateFlow(hiddenKeys + removedKeys)
     val hidden = keys.asStateFlow()
 
@@ -33,7 +47,7 @@ internal class SongVisibility(private val path: Path) {
         if (updated == hiddenKeys) return
         write(path, updated)
         hiddenKeys = updated
-        keys.value = hiddenKeys + removedKeys
+        publishVisibility()
     }
 
     fun remove(key: String) = remove(setOf(key))
@@ -48,18 +62,35 @@ internal class SongVisibility(private val path: Path) {
     }
 
     @Synchronized
-    fun restoreAll() {
-        if (read(removedPath).isNotEmpty()) write(removedPath, emptySet())
-        publishRemoved(emptySet())
-        if (hiddenKeys.isNotEmpty()) write(path, emptySet())
-        hiddenKeys = emptySet()
-        keys.value = emptySet()
+    fun restoreAll() = restoreMatching(null)
+
+    @Synchronized
+    fun restore(entries: Set<String>) {
+        if (entries.isNotEmpty()) restoreMatching(entries)
+    }
+
+    private fun restoreMatching(entries: Set<String>?) {
+        val existingRemoved = read(removedPath)
+        val updatedRemoved = if (entries == null) emptySet() else existingRemoved - entries
+        if (updatedRemoved != existingRemoved) write(removedPath, updatedRemoved)
+        publishRemoved(updatedRemoved)
+        val updatedHidden = if (entries == null) emptySet() else hiddenKeys - entries
+        if (updatedHidden != hiddenKeys) {
+            write(path, updatedHidden)
+            hiddenKeys = updatedHidden
+            publishVisibility()
+        }
     }
 
     private fun publishRemoved(updated: Set<String>) {
+        if (removedKeys != updated) CueRemoval.publishAlbum(albumRemoved, updated)
         removedKeys = updated
+        publishVisibility()
+    }
+
+    private fun publishVisibility() {
+        records.value = SongVisibilityRecords(hiddenKeys, removedKeys)
         keys.value = hiddenKeys + removedKeys
-        CueRemoval.publishAlbum(albumRemoved, removedKeys)
     }
 
     private fun write(path: Path, updated: Set<String>) {

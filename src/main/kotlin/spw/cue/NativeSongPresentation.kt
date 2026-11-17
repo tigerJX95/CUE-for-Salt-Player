@@ -2,7 +2,9 @@ package spw.cue
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.currentComposer
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
 import java.lang.classfile.Opcode
@@ -59,16 +61,23 @@ private val songThemeBinding by lazy {
     }.getOrNull()
 }
 
+private val lastHostSongRowTheme = mutableStateOf<SongRowTheme?>(null)
+
+@Composable
+internal fun probeHostTheme(): SongRowTheme? = lastHostSongRowTheme.value
+
 @Composable
 internal fun nativeSongRowTheme(): SongRowTheme {
     val binding = songThemeBinding ?: return SongRowTheme()
     val composer = currentComposer
     val colors = binding.colors.invoke(null, composer)
-    return SongRowTheme(
+    val theme = SongRowTheme(
         gap = binding.gap.read(composer) as Float,
         accentColor = binding.accentColor.invoke(colors) as Long,
         titleColor = binding.titleColor.invoke(colors) as Long,
         detailColor = binding.detailColor.invoke(colors) as Long,
         detailStyle = binding.detailStyle.read(composer) as TextStyle
     )
+    SideEffect { lastHostSongRowTheme.value = theme }
+    return theme
 }

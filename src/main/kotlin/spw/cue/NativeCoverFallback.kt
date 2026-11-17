@@ -46,7 +46,8 @@ internal class NativeCoverFallback private constructor(
     private val localTrackIds = staticCompositionLocalOf<List<String>> { emptyList() }
 
     fun install(
-        active: () -> Boolean, trackIds: (List<*>) -> List<List<String>>, artwork: () -> NativeAlbumCue.Artwork?,
+        active: () -> Boolean, trackIds: (List<*>) -> List<List<String>>, refresh: AlbumCueRefresh,
+        artwork: () -> NativeAlbumCue.Artwork?,
         report: (String) -> Unit, reportStatistics: (String) -> Unit
     ): AutoCloseable {
         val header = checkNotNull(albumHeader) { "未找到专辑详情封面调用" }
@@ -57,7 +58,7 @@ internal class NativeCoverFallback private constructor(
         val imageHook = registrar.replaceComposable(
             render.declaringClass.name, render.name, caller.name, render.composeParameters(), 50
         ) { call ->
-            cover(call, active, artwork, report)
+            cover(call, active, refresh, artwork, report)
         }
         val statistics = try {
             AlbumHeaderStatistics.create(header.body).also {
@@ -74,7 +75,7 @@ internal class NativeCoverFallback private constructor(
             registrar.replaceComposable(
                 caller.name, header.entry.name, header.decorator.name, header.entry.composeParameters(), 50
             ) { call ->
-                albumHeader(call, header, trackIds, active, report, statistics, reportStatistics)
+                albumHeader(call, header, trackIds, active, refresh, report, statistics, reportStatistics)
             }
         } catch (error: Throwable) {
             runCatching { imageHook.close() }
@@ -151,13 +152,14 @@ internal class NativeCoverFallback private constructor(
     @Composable
     private fun albumHeader(
         call: UiHookCall, header: Header, trackIds: (List<*>) -> List<List<String>>, active: () -> Boolean,
+        refresh: AlbumCueRefresh,
         report: (String) -> Unit, statistics: AlbumHeaderStatistics?, reportStatistics: (String) -> Unit
     ) {
         val groups = call.arguments.firstOrNull()?.let { state ->
             (header.groups.get(state) as? List<*>)?.let(trackIds)
         }.orEmpty()
         val ids = groups.flatten()
-        val sources = key(ids) {
+        val sources = key(ids, refresh.revision(ids)) {
             produceState<List<AlbumCueSource>>(emptyList()) {
                 try {
                     val loaded = runInterruptible(gridReads) {
@@ -198,7 +200,8 @@ internal class NativeCoverFallback private constructor(
 
     @Composable
     private fun cover(
-        call: UiHookCall, active: () -> Boolean, artwork: () -> NativeAlbumCue.Artwork?, report: (String) -> Unit
+        call: UiHookCall, active: () -> Boolean, refresh: AlbumCueRefresh,
+        artwork: () -> NativeAlbumCue.Artwork?, report: (String) -> Unit
     ) {
         val ids = localTrackIds.current
         if (ids.isEmpty() && active()) SideEffect { report("已进入封面绘制，未关联整轨") }
@@ -208,7 +211,7 @@ internal class NativeCoverFallback private constructor(
             when {
                 !active() -> null
                 ids.size > 1 -> multiDiscArtwork(ids, active)
-                else -> artwork()?.takeIf { it.trackId == ids.singleOrNull() }?.image
+                else -> artwork()?.takeIf { it.trackId == ids.singleOrNull() && it.revision == refresh.revision(ids) }?.image
             }
         }
     }

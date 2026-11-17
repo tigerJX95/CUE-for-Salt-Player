@@ -6,6 +6,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,11 +31,15 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -53,6 +60,7 @@ internal fun ProbeWindowContent(
     diagnostics: Boolean,
     report: String,
     showingApi: Boolean,
+    managingAlbum: Boolean,
     onDiscover: () -> Unit,
     onOpen: () -> Unit,
     onSelect: (Int) -> Unit,
@@ -63,13 +71,13 @@ internal fun ProbeWindowContent(
     onRefreshReport: () -> Unit,
     onDiagnoseSongs: () -> Unit,
     onMountSongs: () -> Unit,
-    hiddenSongCount: Int,
-    onRestoreHiddenSongs: () -> Unit,
+    visibility: SongVisibilityRecords,
+    onRestoreHiddenSongs: (Set<String>?) -> Unit,
     onSeek: () -> Unit
 ) {
-    val colors = if (isSystemInDarkTheme()) darkColors else lightColors
+    val colors = probeColors(isSystemInDarkTheme(), probeHostTheme())
     Column(
-        Modifier.fillMaxSize().background(colors.background).padding(20.dp),
+        Modifier.fillMaxSize().background(colors.background).padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -101,7 +109,7 @@ internal fun ProbeWindowContent(
             }
             key(showingApi) {
                 val scroll = rememberScrollState()
-                Box(Modifier.weight(1f).fillMaxWidth().clip(panelShape).background(colors.panel)) {
+                Box(Modifier.weight(1f).fillMaxWidth().clip(panelShape).background(colors.panel).border(1.dp, colors.border, panelShape)) {
                     SelectionContainer(
                         Modifier.fillMaxSize().verticalScroll(scroll).padding(start = 16.dp, top = 12.dp, end = 20.dp, bottom = 12.dp)
                     ) {
@@ -119,11 +127,9 @@ internal fun ProbeWindowContent(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ProbeAction("查找当前 CUE", colors, enabled = !busy, onClick = onDiscover)
-                ProbeAction("手动打开…", colors, enabled = !busy, onClick = onOpen)
-                if (hiddenSongCount > 0) {
-                    ProbeAction("恢复隐藏和移除的分轨", colors, onClick = onRestoreHiddenSongs)
-                }
+                ProbeAction(if (managingAlbum) "重新识别 CUE" else "查找当前 CUE",
+                    colors, enabled = !busy, onClick = onDiscover)
+                ProbeAction("打开 CUE 文件…", colors, enabled = !busy, onClick = onOpen)
                 ProbeText(
                     if (result?.sheet?.title != null) source.orEmpty() else "",
                     colors.secondary, 12, Modifier.weight(1f).padding(start = 4.dp),
@@ -131,8 +137,28 @@ internal fun ProbeWindowContent(
                 )
             }
 
-            Column(Modifier.weight(1f).fillMaxWidth().clip(panelShape).background(colors.panel)) {
-                val tracks = result?.sheet?.tracks.orEmpty()
+            val tracks = result?.sheet?.tracks.orEmpty()
+            val trackKeys = remember(tracks) { tracks.map(SongVisibility::key) }
+            if (visibility.hiddenInSongs.isNotEmpty() || visibility.removedFromLibrary.isNotEmpty()) {
+                val selectedKey = trackKeys.getOrNull(selectedRow)?.takeIf { visibility.label(it) != null }
+                val albumKeys = trackKeys.filterTo(mutableSetOf()) { visibility.label(it) != null }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ProbeAction("恢复所选分轨", colors, enabled = !busy && selectedKey != null) {
+                        selectedKey?.let { onRestoreHiddenSongs(setOf(it)) }
+                    }
+                    if (managingAlbum) {
+                        ProbeAction("恢复本专辑", colors, enabled = !busy && albumKeys.isNotEmpty()) {
+                            onRestoreHiddenSongs(albumKeys)
+                        }
+                    }
+                    ProbeAction("全部恢复", colors, enabled = !busy) { onRestoreHiddenSongs(null) }
+                }
+            }
+
+            Column(
+                Modifier.weight(1f).fillMaxWidth().clip(panelShape)
+                    .background(colors.panel).border(1.dp, colors.border, panelShape)
+            ) {
                 if (tracks.isEmpty()) {
                     Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                         ProbeText(
@@ -142,12 +168,13 @@ internal fun ProbeWindowContent(
                     }
                 } else {
                     Row(
-                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 24.dp).height(38.dp),
+                        Modifier.fillMaxWidth().background(colors.header)
+                            .padding(start = 16.dp, end = 24.dp).height(38.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         ProbeText("轨号", colors.secondary, 12, Modifier.width(46.dp))
                         ProbeText("曲名 / 艺术家", colors.secondary, 12, Modifier.weight(1f))
-                        TrackTimes("起点", "终点", colors.secondary)
+                        TrackDurationCell("时长", colors.secondary)
                     }
                     key(result) {
                         val listState = rememberLazyListState(initialFirstVisibleItemIndex = selectedRow.coerceAtLeast(0))
@@ -156,10 +183,12 @@ internal fun ProbeWindowContent(
                                 modifier = Modifier.fillMaxSize().padding(start = 6.dp, end = 14.dp),
                                 state = listState
                             ) {
-                                itemsIndexed(tracks, key = { _, track -> track.number }) { index, track ->
-                                    val end = track.endMs ?: result?.matches?.get(track.audio)?.duration?.takeIf { it > 0 }
+                                itemsIndexed(tracks, key = { index, _ -> trackKeys[index] }) { index, track ->
+                                    val sourceDuration = result?.matches?.get(track.audio)?.duration
+                                        ?.takeIf { it > 0 } ?: track.endMs ?: 0L
                                     ProbeTrackRow(
-                                        track, end, index == selectedRow, !busy, colors,
+                                        track, sourceDuration, index == selectedRow, !busy, colors,
+                                        visibilityLabel = visibility.label(trackKeys[index]),
                                         onSelect = { onSelect(index) }, onPlay = { onPlay(index) }
                                     )
                                 }
@@ -186,17 +215,26 @@ internal fun ProbeWindowContent(
 @Composable
 private fun ProbeTrackRow(
     track: CueTrack,
-    end: Long?,
+    sourceDuration: Long,
     selected: Boolean,
     enabled: Boolean,
     colors: ProbeColors,
+    visibilityLabel: String?,
     onSelect: () -> Unit,
     onPlay: () -> Unit
 ) {
     val shape = RoundedCornerShape(8.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val background = when {
+        selected -> colors.selected
+        hovered && enabled -> colors.hover
+        else -> Color.Transparent
+    }
     Row(
         Modifier.fillMaxWidth().padding(bottom = 2.dp).clip(shape)
-            .background(if (selected) colors.selected else Color.Transparent)
+            .background(background)
+            .hoverable(interaction, enabled = enabled)
             .combinedClickable(enabled = enabled, role = Role.Button, onClick = onSelect, onDoubleClick = onPlay)
             .heightIn(min = 50.dp).padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -208,16 +246,17 @@ private fun ProbeTrackRow(
         )
         Column(Modifier.weight(1f).padding(end = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             ProbeText(track.title, colors.text, 14, lines = 1, weight = FontWeight.Medium)
-            track.performer?.let { ProbeText(it, colors.secondary, 12, lines = 1) }
+            val details = listOfNotNull(track.performer, visibilityLabel).joinToString(" · ")
+            if (details.isNotEmpty()) ProbeText(details, colors.secondary, 12, lines = 1)
         }
-        TrackTimes(formatCueTime(track.startMs), end?.let(::formatCueTime) ?: "文件结束", colors.secondary)
+        val duration = CuePlaybackWindow.from(track, sourceDuration)?.durationMs
+        TrackDurationCell(duration?.let(::formatCueTime) ?: "—", colors.secondary)
     }
 }
 
 @Composable
-private fun TrackTimes(start: String, end: String, color: Color) {
-    ProbeText(start, color, 13, Modifier.width(88.dp), lines = 1, alignment = TextAlign.End)
-    ProbeText(end, color, 13, Modifier.width(88.dp), lines = 1, alignment = TextAlign.End)
+private fun TrackDurationCell(text: String, color: Color) {
+    ProbeText(text, color, 13, Modifier.width(88.dp), lines = 1, alignment = TextAlign.Center)
 }
 
 @Composable
@@ -229,10 +268,18 @@ private fun ProbeAction(
     onClick: () -> Unit
 ) {
     val shape = RoundedCornerShape(22.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val background = when {
+        primary && enabled -> colors.accent
+        hovered && enabled -> colors.hover
+        else -> colors.header
+    }
     Box(
         Modifier.clip(shape)
-            .background(if (primary && enabled) colors.accent else colors.panel)
+            .background(background)
             .border(1.dp, if (primary && enabled) Color.Transparent else colors.border, shape)
+            .hoverable(interaction, enabled = enabled)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .heightIn(min = 34.dp).padding(horizontal = 14.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
@@ -258,7 +305,10 @@ private fun ProbeText(
 ) {
     BasicText(
         text, modifier,
-        style = TextStyle(color = color, fontSize = size.sp, lineHeight = (size + 5).sp, fontWeight = weight, textAlign = alignment),
+        style = TextStyle(
+            color = color, fontSize = size.sp, lineHeight = (size + 5).sp, fontWeight = weight,
+            fontFamily = probeHostTheme()?.detailStyle?.fontFamily, textAlign = alignment
+        ),
         maxLines = lines, overflow = TextOverflow.Ellipsis
     )
 }
@@ -266,10 +316,12 @@ private fun ProbeText(
 private val panelShape = RoundedCornerShape(12.dp)
 
 @Immutable
-private data class ProbeColors(
+internal data class ProbeColors(
     val background: Color,
     val panel: Color,
+    val header: Color,
     val border: Color,
+    val hover: Color,
     val selected: Color,
     val accent: Color,
     val onAccent: Color,
@@ -278,14 +330,28 @@ private data class ProbeColors(
     val disabled: Color
 )
 
-private val lightColors = ProbeColors(
-    background = Color(0xFFF4F5F7), panel = Color.White, border = Color(0xFFDCE0E5),
-    selected = Color(0xFFE1F1FD), accent = Color(0xFF006DA3), onAccent = Color.White,
-    text = Color(0xFF20262C), secondary = Color(0xFF52606C), disabled = Color(0xFF858E98)
-)
+internal fun probeColors(systemDark: Boolean, host: SongRowTheme?): ProbeColors {
+    val hostText = displayColor(host?.titleColor)
+    val dark = hostText?.let { it.luminance() > .5f } ?: systemDark
+    val background = if (dark) Color(0xFF191A1C) else Color(0xFFF6F7F9)
+    val panel = if (dark) Color(0xFF222326) else Color.White
+    val text = hostText ?: if (dark) Color(0xFFF0F2F4) else Color(0xFF20252B)
+    val accent = displayColor(host?.accentColor) ?: if (dark) Color(0xFF42BFF5) else Color(0xFF006EA6)
+    return ProbeColors(
+        background = background,
+        panel = panel,
+        header = text.copy(alpha = if (dark) .047f else .043f).compositeOver(panel),
+        border = text.copy(alpha = if (dark) .15f else .12f).compositeOver(panel),
+        hover = text.copy(alpha = .085f).compositeOver(panel),
+        selected = accent.copy(alpha = if (dark) .21f else .14f).compositeOver(panel),
+        accent = accent,
+        onAccent = if (accent.luminance() > .20f) Color(0xFF101316) else Color.White,
+        text = text,
+        secondary = displayColor(host?.detailColor) ?: if (dark) Color(0xFFBAC1C9) else Color(0xFF52606C),
+        disabled = text.copy(alpha = .48f).compositeOver(panel)
+    )
+}
 
-private val darkColors = ProbeColors(
-    background = Color(0xFF202020), panel = Color(0xFF292929), border = Color(0xFF444444),
-    selected = Color(0xFF293B47), accent = Color(0xFF4CC2FF), onAccent = Color(0xFF102731),
-    text = Color(0xFFF0F2F4), secondary = Color(0xFFB7BDC4), disabled = Color(0xFF828A93)
-)
+private fun displayColor(value: Long?): Color? = value?.let { Color(it.toULong()) }?.takeIf {
+    it != Color.Unspecified && it.alpha >= .65f
+}

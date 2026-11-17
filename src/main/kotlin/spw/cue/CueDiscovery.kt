@@ -23,6 +23,10 @@ internal object CueDiscovery {
     }
 
     // The Songs page receives whole-library snapshots. Read each directory and CUE once per snapshot.
+    fun refreshMatches(
+        cached: Map<Path, LocatedCue>, sources: Set<Path>, active: () -> Boolean
+    ): Map<Path, LocatedCue> = (cached - sources) + findAll(sources, active)
+
     fun findAll(audioFiles: Collection<Path>, active: () -> Boolean): Map<Path, LocatedCue> = buildMap {
         for ((folder, files) in audioFiles.groupBy { it.parent }) {
             if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()

@@ -1,6 +1,8 @@
 package spw.cue
 
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.xuncorp.spw.workshop.api.ActionShortcut
 import com.xuncorp.spw.workshop.api.Channel
 import com.xuncorp.spw.workshop.api.PlaybackExtensionPoint
@@ -18,7 +20,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel as CoroutineChannel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import org.pf4j.Extension
 import java.awt.event.KeyEvent
 import java.util.function.Consumer
 import javax.swing.SwingUtilities
@@ -27,6 +28,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     @OptIn(UnstableSpwWorkshopApi::class)
     private class Session {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val albumRefresh = AlbumCueRefresh()
         val configChanges = CoroutineChannel<ConfigHelper>(CoroutineChannel.CONFLATED)
         var configReady = false
         var preparingNativeUi = false
@@ -45,7 +47,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     private var songCoverHook: AutoCloseable? = null
     private var songPageHook: AutoCloseable? = null
     private var songPage: NativeSongCue? = null
-    private var songVisibility: SongVisibility? = null
+    private var songVisibility by mutableStateOf<SongVisibility?>(null)
     private var songDiagnostics = SongPageDiagnostics()
     private var miniPlayerCue: NativeMiniPlayerCue? = null
     private var taskbarCue: AutoCloseable? = null
@@ -315,7 +317,15 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             albumPageStatus = "尚未收到专辑页回调"
             val target = AlbumHookTarget.resolve()
             val content = NativeAlbumCue(
-                target, { activeSession === session }, { hideWholeTrack.value }, session.scope
+                target, { activeSession === session }, { hideWholeTrack.value }, session.scope,
+                session.albumRefresh,
+                { ids ->
+                    dispatch(session) {
+                        refreshAlbum(session, ids)
+                        WorkshopApi.ui.toast("正在重新识别当前专辑的 CUE", WorkshopApi.Ui.ToastType.Success)
+                    }
+                },
+                { ids -> dispatch(session) { showAlbumWindow(session, ids) } }
             ) { status ->
                 if (activeSession === session) albumPageStatus = status
             }
@@ -336,6 +346,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                     cover.install(
                         active = { activeSession === session },
                         trackIds = { groups -> target.trackGroupsIn(groups).map { disc -> disc.map { it.id } } },
+                        refresh = session.albumRefresh,
                         artwork = { content.artwork },
                         report = { if (activeSession === session) albumCoverStatus = it },
                         reportStatistics = { if (activeSession === session) albumStatisticsStatus = it }
@@ -463,6 +474,40 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         }
     }
 
+    private fun refreshAlbum(session: Session, ids: List<String>) {
+        if (activeSession !== session || ids.isEmpty()) return
+        session.albumRefresh.request(ids)
+        songPage?.refreshAlbum(ids)
+    }
+
+    private fun showAlbumWindow(session: Session, ids: List<String>) {
+        val current = windowFor(session)
+        windowPinned = true
+        current.isAutoRequestFocus = true
+        current.isVisible = true
+        current.toFront()
+        current.openAlbum(ids)
+    }
+
+    private fun restoreSongs(session: Session, entries: Set<String>?) {
+        if (activeSession !== session) return
+        songPage?.let {
+            it.restoreHiddenSongs(entries)
+            return
+        }
+        val store = songVisibility ?: return
+        session.scope.launch {
+            if (activeSession !== session) return@launch
+            try {
+                if (entries == null) store.restoreAll() else store.restore(entries)
+            } catch (error: Exception) {
+                dispatch(session) {
+                    WorkshopApi.ui.toast(error.message ?: "无法恢复分轨", WorkshopApi.Ui.ToastType.Warning)
+                }
+            }
+        }
+    }
+
     private fun windowFor(session: Session): ProbeWindow =
         window?.takeIf { it.isDisplayable } ?: ProbeWindow(
             pluginContext.pluginVersion,
@@ -475,8 +520,9 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             songReport = { songDiagnostics.report() },
             diagnoseSongs = { onUpdated -> diagnoseSongs(session, onUpdated) },
             mountSongs = { mountSongs(session) },
-            hiddenSongs = songVisibility?.hidden,
-            restoreHiddenSongs = { if (activeSession === session) songPage?.restoreHiddenSongs() },
+            visibility = { songVisibility?.recovery },
+            restoreHiddenSongs = { restoreSongs(session, it) },
+            refreshAlbum = { refreshAlbum(session, it) },
             canReadLibrary = ::canReadLibrary,
             active = { activeSession === session }
         ).also {
@@ -545,40 +591,4 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             shortcut = null
         }
     }
-}
-
-@Extension
-class PlaybackProbe : PlaybackExtensionPoint {
-    override fun onBeforeLoadLyrics(mediaItem: PlaybackExtensionPoint.MediaItem): String? {
-        mediaChanged?.invoke()
-        return null
-    }
-
-    override fun onStateChanged(state: PlaybackExtensionPoint.State) {
-        if (state == PlaybackExtensionPoint.State.Ready || state == PlaybackExtensionPoint.State.Idle) {
-            mediaChanged?.invoke()
-        }
-    }
-
-    override fun onIsPlayingChanged(isPlaying: Boolean) {
-        if (isPlaying) mediaChanged?.invoke()
-    }
-
-    override fun onSeekTo(position: Long) {
-        lastSeek = Sample(position, System.nanoTime())
-    }
-
-    override fun onPositionUpdated(position: Long) {
-        lastPosition = Sample(position, System.nanoTime())
-    }
-
-    companion object {
-        @Volatile internal var mediaChanged: (() -> Unit)? = null
-        @Volatile internal var lastSeek: Sample? = null
-            private set
-        @Volatile internal var lastPosition: Sample? = null
-            private set
-    }
-
-    internal data class Sample(val position: Long, val observedAt: Long)
 }
