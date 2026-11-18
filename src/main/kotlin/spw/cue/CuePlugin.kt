@@ -49,7 +49,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     private var songPage: NativeSongCue? = null
     private var songVisibility by mutableStateOf<SongVisibility?>(null)
     private var songDiagnostics = SongPageDiagnostics()
-    private var miniPlayerCue: NativeMiniPlayerCue? = null
+    private var miniPlayerCue by mutableStateOf<NativeMiniPlayerCue?>(null)
     private var taskbarCue: AutoCloseable? = null
     private var configSubscription: AutoCloseable? = null
     private val hideWholeTrack = mutableStateOf(false)
@@ -325,7 +325,8 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                         WorkshopApi.ui.toast("正在重新识别当前专辑的 CUE", WorkshopApi.Ui.ToastType.Success)
                     }
                 },
-                { ids -> dispatch(session) { showAlbumWindow(session, ids) } }
+                { ids -> dispatch(session) { showAlbumWindow(session, ids) } },
+                { miniPlayerCue?.currentTrack() }
             ) { status ->
                 if (activeSession === session) albumPageStatus = status
             }
@@ -441,7 +442,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         songDiagnostics = diagnostics
         try {
             val candidate = NativeSongCue(SongHookTarget.resolve(), { hideWholeTrack.value },
-                { activeSession === session }, diagnostics, songVisibility)
+                { activeSession === session }, diagnostics, songVisibility, { miniPlayerCue?.currentTrack() })
             songPageHook = candidate.install()
             songPage = candidate
             diagnostics.registration = "已连接歌曲页 · 自动显示待启用"
@@ -478,6 +479,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         if (activeSession !== session || ids.isEmpty()) return
         session.albumRefresh.request(ids)
         songPage?.refreshAlbum(ids)
+        miniPlayerCue?.refreshCue()
     }
 
     private fun showAlbumWindow(session: Session, ids: List<String>) {

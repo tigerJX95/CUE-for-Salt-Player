@@ -20,6 +20,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.platform.LocalDensity
@@ -57,6 +58,7 @@ internal class NativeAlbumCue(
     private val refresh: AlbumCueRefresh,
     private val refreshAlbum: (List<String>) -> Unit,
     private val openAlbum: (List<String>) -> Unit,
+    private val currentTrack: @Composable () -> CueTrack?,
     private val report: (String) -> Unit
 ) {
     private data class MatchedAlbum(val page: Any, val trackId: String, val revision: Long)
@@ -108,14 +110,16 @@ internal class NativeAlbumCue(
                 }, appendFallback = {
                     appendMultiDisc(scope, tracks, revision)
                     appendAlbumActions(scope, ids)
-                })
+                }, cues = matches)
                 return
             }
 
             cancelDiscLookup()
             val match = MatchedAlbum(page, track.id, revision)
             val album = matchedAlbum?.takeIf { it.first == match }?.second
-            list.apply(hideWholeTrack() && album != null && CueRemoval.visibleAlbum(album).tracks.isNotEmpty()) { hidden ->
+            val hide = hideWholeTrack() && album != null && CueRemoval.visibleAlbum(album).tracks.isNotEmpty()
+            val cues = if (album == null) emptyMap() else mapOf(track.id to album)
+            list.apply(hide, cues) { hidden ->
                 val appended = append(scope, match, track, hidden, compact = true)
                 appendAlbumActions(scope, ids)
                 appended
@@ -194,7 +198,9 @@ internal class NativeAlbumCue(
         try {
             val playAt = playbackFor(track, sequence)
             target.appendCue(scope, track.id) {
-                if (active()) AlbumCueRows(track.id, hidden, playAt, active, report, revision, multiDiscSeeking, resolvedCue)
+                if (active()) {
+                    AlbumCueRows(track.id, hidden, playAt, active, report, currentTrack, revision, multiDiscSeeking, resolvedCue)
+                }
             }
         } catch (error: Exception) {
             report("追加分轨区失败：${error.javaClass.simpleName}")
@@ -207,7 +213,7 @@ internal class NativeAlbumCue(
         val byId = tracks.associateBy { it.id }
         target.appendCue(scope, ids.joinToString(prefix = "multi-disc:", separator = ",") { "${it.length}:$it" }) {
             if (active()) {
-                MultiDiscCueRows(ids, revision, active, report) { id, matches ->
+                MultiDiscCueRows(ids, revision, active, report, currentTrack) { id, matches ->
                     byId[id]?.let { playbackFor(it, albumSequence(tracks, matches)) }
                 }
             }
@@ -253,7 +259,7 @@ internal class NativeAlbumCue(
             val playAt = playbackFor(track)
             target.appendCue(scope, match.trackId) {
                 if (active()) {
-                    AlbumCueRows(match.trackId, hidden, playAt, active, report, match.revision) { album, cover ->
+                    AlbumCueRows(match.trackId, hidden, playAt, active, report, currentTrack, match.revision) { album, cover ->
                         if (refresh.revision(listOf(match.trackId)) != match.revision) return@AlbumCueRows
                         if (album != null && album.tracks.isNotEmpty()) {
                             matchedAlbum = match to album
@@ -289,7 +295,7 @@ private fun AlbumCueActions(refresh: () -> Unit, open: () -> Unit) {
 @Composable
 private fun AlbumCueRows(
     trackId: String, wholeTrackHidden: Boolean, playAt: ((Long, Boolean) -> Unit)?, active: () -> Boolean,
-    report: (String) -> Unit, revision: Long, sharedSeeking: MutableState<Boolean>? = null,
+    report: (String) -> Unit, currentTrack: @Composable () -> CueTrack?, revision: Long, sharedSeeking: MutableState<Boolean>? = null,
     resolvedCue: AlbumCue? = null, onMatch: ((AlbumCue?, ImageBitmap?) -> Unit)? = null
 ) {
     var cue by remember(trackId, revision, resolvedCue) { mutableStateOf(resolvedCue) }
@@ -319,12 +325,13 @@ private fun AlbumCueRows(
     if (album.tracks.isEmpty()) return
     SideEffect { report("已提交至原生布局 · ${album.tracks.size} 轨") }
     val seeking = sharedSeeking ?: remember(trackId) { mutableStateOf(false) }
-    AlbumCueSection(album, null, wholeTrackHidden, playAt, active, seeking)
+    AlbumCueSection(album, null, wholeTrackHidden, playAt, active, seeking, currentTrack())
 }
 
 @Composable
 private fun MultiDiscCueRows(
     ids: List<String>, revision: Long, active: () -> Boolean, report: (String) -> Unit,
+    currentTrack: @Composable () -> CueTrack?,
     playAt: (String, Map<String, AlbumCue>) -> ((Long, Boolean) -> Unit)?
 ) {
     var sources by remember(ids, revision) { mutableStateOf<List<AlbumCueSource>>(emptyList()) }
@@ -348,13 +355,14 @@ private fun MultiDiscCueRows(
     val visible = sources.map { it to CueRemoval.visibleAlbum(it.cue) }.filter { it.second.tracks.isNotEmpty() }
     if (visible.isEmpty()) return
     SideEffect { report("已提交至原生布局 · ${visible.size} 碟 · ${visible.sumOf { it.second.tracks.size }} 轨") }
+    val playing = currentTrack()
     Column {
         for ((source, album) in visible) {
             key(source.trackId) {
                 val filename = source.audio.fileName.toString()
                 val duplicateName = sources.count { it.audio.fileName == source.audio.fileName } > 1
                 val label = if (duplicateName) "${source.audio.parent.fileName}/$filename" else filename
-                AlbumCueSection(album, label, false, playAt(source.trackId, matches), active, seeking)
+                AlbumCueSection(album, label, false, playAt(source.trackId, matches), active, seeking, playing)
             }
         }
     }
@@ -363,13 +371,15 @@ private fun MultiDiscCueRows(
 @Composable
 private fun AlbumCueSection(
     album: AlbumCue, label: String?, wholeTrackHidden: Boolean, playAt: ((Long, Boolean) -> Unit)?,
-    active: () -> Boolean, seekingState: MutableState<Boolean>
+    active: () -> Boolean, seekingState: MutableState<Boolean>, playing: CueTrack?
 ) {
     var seeking by seekingState
     val scope = rememberCoroutineScope()
     val tracks = album.tracks
     if (tracks.isEmpty()) return
     val theme = nativeSongRowTheme()
+    val playingIndex = album.indexOfPlayingTrack(playing)
+    val accent = theme.accentColor ?: Color(0xFF42BFF5).value.toLong()
     val gap = theme.gap.dp
     val durationWidth = with(LocalDensity.current) { (48.dp.roundToPx() + 2 * gap.roundToPx()).toDp() }
     val durationStyle = theme.detailStyle.copy(fontFeatureSettings = "tnum")
@@ -380,6 +390,7 @@ private fun AlbumCueSection(
             NativeAlbumText("使用专辑播放按钮开始播放后，点选分轨即可跳转。", Modifier.padding(horizontal = 12.dp))
         }
         for ((index, track) in tracks.withIndex()) {
+            val playingColor = accent.takeIf { index == playingIndex }
             Row(
                 modifier = Modifier.fillMaxWidth().clickable(enabled = !seeking) {
                     if (active() && !seeking) {
@@ -408,20 +419,22 @@ private fun AlbumCueSection(
                     track.number.toString().padStart(2, '0'),
                     Modifier.width(32.dp),
                     singleLine = true,
-                    style = albumCueRowStyle
+                    style = albumCueRowStyle,
+                    color = playingColor
                 )
                 NativeAlbumText(
                     track.title,
                     Modifier.weight(1f).padding(end = 12.dp),
                     singleLine = true,
-                    style = albumCueRowStyle
+                    style = albumCueRowStyle,
+                    color = playingColor
                 )
                 NativeAlbumText(
                     album.trackDurationLabels[index],
                     Modifier.width(durationWidth),
                     singleLine = true,
                     style = durationStyle,
-                    color = theme.detailColor
+                    color = playingColor ?: theme.detailColor
                 )
             }
         }

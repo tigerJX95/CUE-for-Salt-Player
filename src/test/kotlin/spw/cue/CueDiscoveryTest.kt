@@ -3,8 +3,10 @@ package spw.cue
 import java.nio.charset.Charset
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -53,6 +55,48 @@ class CueDiscoveryTest {
             CueDiscovery.find(folder().resolve("整轨.WAV"))
         }
         assertTrue(error.message.orEmpty().contains("16"))
+    }
+
+    @Test fun reusesUnchangedExternalCueAcrossLibrarySnapshots() {
+        val audio = folder().resolve("album.wav")
+        cue("album.cue", "album.wav")
+        val cache = CueDiscovery.ParsedCueCache()
+
+        val first = CueDiscovery.findAll(listOf(audio), cache) { true }.getValue(audio)
+        val second = CueDiscovery.findAll(listOf(folder().resolve("other.wav"), audio), cache) { true }.getValue(audio)
+
+        assertSame(first, second)
+    }
+
+    @Test fun nextSnapshotReadsChangedCuesAndDropsDeletedOnes() {
+        val audio = folder().resolve("album.wav")
+        val path = cue("album.cue", "album.wav")
+        val cache = CueDiscovery.ParsedCueCache()
+        CueDiscovery.findAll(listOf(audio), cache) { true }
+
+        Files.writeString(path, Files.readString(path) + "\nTITLE Changed")
+        val updated = CueDiscovery.findAll(listOf(audio), cache) { true }
+        assertEquals("Changed", updated.getValue(audio).sheet.tracks.single().title)
+
+        Files.delete(path)
+        assertTrue(CueDiscovery.findAll(listOf(audio), cache) { true }.isEmpty())
+    }
+
+    @Test fun manualInvalidationRereadsSameSizeCuesWithPreservedTimestamps() {
+        val audio = folder().resolve("album.wav")
+        val path = cue("album.cue", "album.wav")
+        Files.writeString(path, Files.readString(path) + "\nTITLE First")
+        Files.setLastModifiedTime(path, FileTime.fromMillis(1_700_000_000_000L))
+        val stamp = Files.getLastModifiedTime(path)
+        val cache = CueDiscovery.ParsedCueCache()
+        CueDiscovery.findAll(listOf(audio), cache) { true }
+
+        Files.writeString(path, Files.readString(path).replace("First", "Other"))
+        Files.setLastModifiedTime(path, stamp)
+        cache.invalidateFolders(setOf(folder()))
+        val updated = CueDiscovery.findAll(listOf(audio), cache) { true }
+
+        assertEquals("Other", updated.getValue(audio).sheet.tracks.single().title)
     }
 
     private fun folder(): Path = temp.root.toPath()

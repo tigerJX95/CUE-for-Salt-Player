@@ -4,12 +4,64 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 
 internal data class LocatedCue(val path: Path, val sheet: CueSheet)
 
 internal object CueDiscovery {
     private const val MAX_DIRECTORY_ENTRIES = 4096
     private const val MAX_CUE_FILES = 16
+
+    internal class ParsedCueCache {
+        private data class Stamp(val size: Long, val modified: FileTime, val fileKey: Any?)
+        private data class Entry(val stamp: Stamp, val cue: LocatedCue)
+
+        private val entries = mutableMapOf<Path, Entry>()
+        private var trackCount = 0
+
+        fun load(path: Path): LocatedCue? {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+            val cached = entries[path]
+            if (cached == null && (entries.size >= MAX_CACHED_FILES || trackCount >= MAX_CACHED_TRACKS)) {
+                return read(path)
+            }
+            val stamp = try {
+                val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                Stamp(attrs.size(), attrs.lastModifiedTime(), attrs.fileKey())
+            } catch (_: IOException) {
+                null
+            } catch (_: SecurityException) {
+                null
+            }
+            if (cached != null && cached.stamp == stamp) return cached.cue
+            remove(path)
+            val cue = read(path) ?: return null
+            val tracks = cue.sheet.tracks.size
+            // Keep cached entries at capacity so repeated full-library scans can still reuse them.
+            if (stamp != null && tracks <= MAX_CACHED_TRACKS - trackCount) {
+                entries[path] = Entry(stamp, cue)
+                trackCount += tracks
+            }
+            return cue
+        }
+
+        fun invalidateFolders(folders: Set<Path>) {
+            if (folders.isNotEmpty()) entries.keys.filter { it.parent in folders }.forEach(::remove)
+        }
+
+        fun retainScanned(paths: Set<Path>) = entries.keys.filter { it !in paths }.forEach(::remove)
+
+        private fun remove(path: Path) {
+            val entry = entries.remove(path) ?: return
+            trackCount -= entry.cue.sheet.tracks.size
+        }
+
+        private companion object {
+            const val MAX_CACHED_FILES = 4_096
+            const val MAX_CACHED_TRACKS = 65_536
+        }
+    }
 
     fun find(audio: Path): LocatedCue? {
         val folder = audio.parent ?: return null
@@ -25,9 +77,12 @@ internal object CueDiscovery {
     // The Songs page receives whole-library snapshots. Read each directory and CUE once per snapshot.
     fun refreshMatches(
         cached: Map<Path, LocatedCue>, sources: Set<Path>, active: () -> Boolean
-    ): Map<Path, LocatedCue> = (cached - sources) + findAll(sources, active)
+    ): Map<Path, LocatedCue> = (cached - sources) + findAll(sources, active = active)
 
-    fun findAll(audioFiles: Collection<Path>, active: () -> Boolean): Map<Path, LocatedCue> = buildMap {
+    fun findAll(
+        audioFiles: Collection<Path>, cache: ParsedCueCache? = null, active: () -> Boolean
+    ): Map<Path, LocatedCue> = buildMap {
+        val scanned = cache?.let { mutableSetOf<Path>() }
         for ((folder, files) in audioFiles.groupBy { it.parent }) {
             if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
             if (folder == null) continue
@@ -43,7 +98,9 @@ internal object CueDiscovery {
             }
             val byAudio = mutableMapOf<Path, MutableList<LocatedCue>>()
             for (path in candidates) {
-                val cue = read(path) ?: continue
+                if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
+                scanned?.add(path)
+                val cue = (if (cache == null) read(path) else cache.load(path)) ?: continue
                 for (audio in cue.sheet.tracks.map { it.audio }.distinct()) {
                     if (audio in available) byAudio.getOrPut(audio, ::mutableListOf).add(cue)
                 }
@@ -57,6 +114,7 @@ internal object CueDiscovery {
                 EmbeddedFlacCue.find(audio)?.let { put(audio, it) }
             }
         }
+        if (scanned != null) cache.retainScanned(scanned)
     }
 
     private fun candidates(folder: Path): List<Path> {

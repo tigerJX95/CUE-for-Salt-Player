@@ -25,6 +25,10 @@ internal data class CueTrack(
     val endMs: Long? = nextStartFrame?.let { it * 1_000 / 75 }
 )
 
+// Metadata may change or gain a fallback artist without changing the playing segment.
+internal fun CueTrack.matchesPlaybackTrack(other: CueTrack?): Boolean =
+    other != null && audio == other.audio && number == other.number && startFrame == other.startFrame
+
 internal fun String?.artistName(): String? {
     val name = this?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val credit = name.trimEnd(':', '：').trimEnd()

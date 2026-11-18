@@ -2,6 +2,14 @@
 
 [中文](CHANGELOG.md) | [English](CHANGELOG_EN.md)
 
+## v0.5.0 — 2026-11-18
+
+- **Playback highlighting.** Album Details and Songs use the accent color for the playing CUE track, following track and disc changes. Its original audio row uses the normal color while the CUE track is visible.
+- **Search in the CUE window.** Filter by title or artist using multiple keywords and see the matching count. Playback and restoration still target the original track. Clear the search to restore the full list.
+- **External CUE cache.** Library snapshots reuse parsing results for unchanged files. The cache limits file and track counts and removes files no longer encountered during scanning.
+- **Scoped refresh and original-entry restoration.** Refreshing an album rebuilds CUE entries only for affected audio files, including multiple library records pointing to the same file. The original audio entry returns if its CUE match is lost.
+- **Refresh playback metadata.** Refresh CUE forces the affected files to be read again and re-reads the current playback file’s CUE data, updating the title, artist, and track time range without switching audio files first.
+
 ## v0.4.0
 
 - **Playback across discs.** After starting a CUE track in Album Details, Next at the end of a disc goes to the first track on the next disc, and Previous at the start goes to the last track on the previous disc. Playback can continue automatically to the next adjacent disc with CUE tracks.

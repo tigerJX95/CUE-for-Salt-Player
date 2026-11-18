@@ -72,6 +72,7 @@ import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.WeakHashMap
 
 @OptIn(UnstableSpwWorkshopApi::class)
@@ -80,7 +81,8 @@ internal class NativeSongCue(
     private val hideWholeTrack: () -> Boolean,
     private val active: () -> Boolean,
     private val diagnostics: SongPageDiagnostics,
-    private val visibility: SongVisibility?
+    private val visibility: SongVisibility?,
+    private val currentTrack: @Composable () -> CueTrack?
 ) {
     private data class Song(
         val key: String,
@@ -102,16 +104,18 @@ internal class NativeSongCue(
         val query: String
     )
 
+    private data class ProjectedTrack(val entity: Any, val song: Song)
+
     private data class Indexed(
-        val sources: Map<Any, List<Any>>,
+        val catalogue: CueSongSources,
+        val sources: Map<Any, List<ProjectedTrack>>,
         val songs: Map<String, Song>,
-        val cues: Map<java.nio.file.Path, LocatedCue>,
-        val pathCount: Int,
+        val cues: Map<Path, LocatedCue>,
         val matchedSources: Int,
         val matchedTracks: Int
     )
     private sealed interface RowPlan {
-        data class Original(val index: Int, val artwork: SongArtwork?) : RowPlan
+        data class Original(val index: Int, val artwork: SongArtwork?, val sourceId: String) : RowPlan
         data class Cue(val song: Song) : RowPlan
     }
     private data class GroupPlan(val nativeCount: Int, val rows: List<RowPlan>)
@@ -122,6 +126,8 @@ internal class NativeSongCue(
         val cueKeys: Set<String>,
         val entries: List<GroupPlan>
     ) : List<Any> by groups {
+        val visibleCueTracks = entries.flatMap { it.rows }.filterIsInstance<RowPlan.Cue>()
+            .groupBy({ it.song.source.id }, { it.song.track })
         // Success uses structural equality. Searches with the same source file can show different rows.
         override fun equals(other: Any?): Boolean =
             other is SongGroups && groups == other.groups && entries == other.entries
@@ -132,6 +138,7 @@ internal class NativeSongCue(
 
     private var indexed: WeakReference<List<*>> = WeakReference(null)
     private var indexedCues: Indexed? = null
+    private val parsedCues = CueDiscovery.ParsedCueCache()
     // Preserve rapid off/on requests even when a StateFlow collector skips the intermediate value.
     private data class Activation(val enabled: Boolean, val revision: Long = 0)
     private val mount = MutableStateFlow(Activation(false))
@@ -524,14 +531,14 @@ internal class NativeSongCue(
                 if (refreshRevision.value != revision) return null
                 pendingRefresh.removeAll(refreshIds)
             }
-            diagnostics.scanned(library.pathCount, library.matchedSources, library.matchedTracks, library.songs.size)
+            diagnostics.scanned(library.catalogue.all.size, library.matchedSources, library.matchedTracks, library.songs.size)
             if (!active()) return null
             if (library.songs.isEmpty()) return input.original.takeIf { ownsState }
             val expanded = buildList {
                 for (entity in entities.filterNotNull()) {
                     val split = library.sources[entity]
                     if (!hide || split == null) add(entity)
-                    split?.filterTo(this) { library.songs.getValue(target.id(it)).visibilityKey !in excluded }
+                    split?.forEach { if (it.song.visibilityKey !in excluded) add(it.entity) }
                 }
             }
             callbackCheck.set(CallbackCheck())
@@ -564,49 +571,97 @@ internal class NativeSongCue(
     private fun index(entities: List<*>, refreshIds: Set<String>): Indexed {
         val cached = indexedCues?.takeIf { indexed.get() === entities }
         if (cached != null && refreshIds.isEmpty()) return cached
-        val tracks = entities.filterNotNull()
-        val paths = tracks.mapNotNull { entity -> target.audioPath(entity)?.let { entity to it } }.toMap()
+        val catalogue = cached?.catalogue ?: catalogue(entities)
+        val refreshedPaths = catalogue.pathsFor(refreshIds)
+        if (cached != null && refreshedPaths.isEmpty()) return cached
+        parsedCues.invalidateFolders(refreshedPaths.mapNotNullTo(mutableSetOf()) { it.parent })
         val cues = if (cached == null) {
-            CueDiscovery.findAll(paths.values, active)
+            CueDiscovery.findAll(catalogue.all.map(CueSongSource::audio), parsedCues, active)
         } else {
-            val refreshedPaths = paths.filterKeys { target.id(it) in refreshIds }.values.toSet()
             CueDiscovery.refreshMatches(cached.cues, refreshedPaths, active)
         }
-        val originalIds = tracks.mapTo(HashSet(), target::id)
+        // Duplicate native IDs can compete for the same synthetic ID. Rebuild in host order then.
+        val reusable = cached?.takeIf { catalogue.hasUniqueIds }
+        val updated = if (reusable == null) buildIndex(catalogue, cues) else updateIndex(reusable, cues, refreshedPaths)
+        indexed = WeakReference(entities)
+        indexedCues = updated
+        return updated
+    }
+
+    private fun catalogue(entities: List<*>): CueSongSources {
+        val tracks = entities.filterNotNull()
+        val ids = tracks.associateWith(target::id)
+        val paths = tracks.mapNotNull { entity -> target.audioPath(entity)?.let { entity to it } }.toMap()
+        return CueSongSources(
+            paths.map { (entity, audio) -> CueSongSource(entity, ids.getValue(entity), audio) },
+            ids.values.toSet()
+        )
+    }
+
+    private fun buildIndex(catalogue: CueSongSources, cues: Map<Path, LocatedCue>): Indexed {
         val songs = mutableMapOf<String, Song>()
-        val sources = mutableMapOf<Any, List<Any>>()
-        var matchedTracks = 0
+        val sources = mutableMapOf<Any, List<ProjectedTrack>>()
         var matchedSources = 0
-        for ((entity, audio) in paths) {
+        var matchedTracks = 0
+        for (source in catalogue.all) {
             if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
-            val sheet = cues[audio]?.sheet ?: continue
-            val segments = sheet.tracks.filter { it.audio == audio }
+            val sheet = cues[source.audio]?.sheet ?: continue
+            val segments = sheet.tracks.filter { it.audio == source.audio }
             if (segments.isEmpty()) continue
             matchedSources++
             matchedTracks += segments.size
-            val id = target.id(entity)
-            if (id.isBlank() || !Files.isRegularFile(audio) || !Files.isReadable(audio)) continue
-            val fileDuration = target.duration(entity)
-            val source = AlbumHookTarget.Track(id, entity)
-            val sourceArtist = target.artist(entity).orEmpty()
-            val album = target.album(entity) ?: sheet.title.orEmpty()
-            val artwork = SongArtwork(id, audio)
-            val split = buildList {
-                for (segment in segments) {
-                    val window = CuePlaybackWindow.from(segment, fileDuration) ?: continue
-                    val key = "$CUE_SONG_KEY_PREFIX${id.length}:$id:${segment.number}"
-                    if (key in originalIds || key in songs) continue
-                    val artist = segment.performer ?: sourceArtist
-                    add(target.trackForFilter(entity, key, segment, artist, window.durationMs))
-                    songs[key] = Song(key, SongVisibility.key(segment), source, segment, artist, album, artwork, fileDuration, window.durationMs)
+            projectSource(source, sheet, segments, catalogue.originalIds, songs, sources)
+        }
+        return Indexed(catalogue, sources, songs, cues, matchedSources, matchedTracks)
+    }
+
+    private fun updateIndex(cached: Indexed, cues: Map<Path, LocatedCue>, paths: Set<Path>): Indexed {
+        val songs = cached.songs.toMutableMap()
+        val sources = cached.sources.toMutableMap()
+        var matchedSources = cached.matchedSources
+        var matchedTracks = cached.matchedTracks
+        for ((audio, affected) in cached.catalogue.sourcesFor(paths)) {
+            if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
+            val oldCount = cached.cues[audio]?.sheet?.tracks?.count { it.audio == audio } ?: 0
+            val sheet = cues[audio]?.sheet
+            val segments = sheet?.tracks?.filter { it.audio == audio }.orEmpty()
+            if (oldCount > 0) matchedSources -= affected.size
+            if (segments.isNotEmpty()) matchedSources += affected.size
+            matchedTracks += (segments.size - oldCount) * affected.size
+            for (source in affected) {
+                sources.remove(source.entity)?.forEach { songs.remove(it.song.key) }
+                if (sheet != null && segments.isNotEmpty()) {
+                    projectSource(source, sheet, segments, cached.catalogue.originalIds, songs, sources)
                 }
             }
-            if (split.isNotEmpty()) sources[entity] = split
         }
-        return Indexed(sources, songs, cues, paths.size, matchedSources, matchedTracks).also {
-            indexed = WeakReference(entities)
-            indexedCues = it
+        return Indexed(cached.catalogue, sources, songs, cues, matchedSources, matchedTracks)
+    }
+
+    private fun projectSource(
+        input: CueSongSource, sheet: CueSheet, segments: List<CueTrack>, originalIds: Set<String>,
+        songs: MutableMap<String, Song>, sources: MutableMap<Any, List<ProjectedTrack>>
+    ) {
+        val (entity, id, audio) = input
+        if (id.isBlank() || !Files.isRegularFile(audio) || !Files.isReadable(audio)) return
+        val fileDuration = target.duration(entity)
+        val source = AlbumHookTarget.Track(id, entity)
+        val sourceArtist = target.artist(entity).orEmpty()
+        val album = target.album(entity) ?: sheet.title.orEmpty()
+        val artwork = SongArtwork(id, audio)
+        val split = buildList {
+            for (segment in segments) {
+                val window = CuePlaybackWindow.from(segment, fileDuration) ?: continue
+                val key = "$CUE_SONG_KEY_PREFIX${id.length}:$id:${segment.number}"
+                if (key in originalIds || key in songs) continue
+                val artist = segment.performer ?: sourceArtist
+                val row = target.trackForFilter(entity, key, segment, artist, window.durationMs)
+                val song = Song(key, SongVisibility.key(segment), source, segment, artist, album, artwork, fileDuration, window.durationMs)
+                add(ProjectedTrack(row, song))
+                songs[key] = song
+            }
         }
+        if (split.isNotEmpty()) sources[entity] = split
     }
 
     private fun remap(state: Any, songs: Map<String, Song>): SongGroups {
@@ -621,7 +676,7 @@ internal class NativeSongCue(
                 val id = target.id(entity)
                 val song = songs[id]
                 if (song == null) {
-                    RowPlan.Original(originals.size, cueSources[id]).also { originals.add(entity) }
+                    RowPlan.Original(originals.size, cueSources[id], id).also { originals.add(entity) }
                 } else {
                     cueKeys.add(song.key)
                     RowPlan.Cue(song)
@@ -686,7 +741,7 @@ internal class NativeSongCue(
                 if (entry.method == target.itemBatch) {
                     val items = groups.entries.getOrNull(group++) ?: error("歌曲列表批次与分组不匹配")
                     check(entry.args.first() == items.nativeCount) { "歌曲列表曲目数量不匹配" }
-                    ScopeCall(entry.method, withCueRows(entry.args, items.rows, selection, selectionState))
+                    ScopeCall(entry.method, withCueRows(entry.args, items.rows, groups.visibleCueTracks, selection, selectionState))
                 } else entry
             }
             check(group == groups.entries.size) { "歌曲列表批次缺失" }
@@ -703,7 +758,8 @@ internal class NativeSongCue(
 
     @Suppress("UNCHECKED_CAST")
     private fun withCueRows(
-        original: Array<Any?>, rows: List<RowPlan>, selection: NativeSongSelection?, selectionState: Any?
+        original: Array<Any?>, rows: List<RowPlan>, visibleCueTracks: Map<String, List<CueTrack>>,
+        selection: NativeSongSelection?, selectionState: Any?
     ): Array<Any?> {
         if (rows.all { it is RowPlan.Original && it.artwork == null }) return original
         val key = original[1] as (Int) -> Any?
@@ -726,11 +782,16 @@ internal class NativeSongCue(
         }
         val rowContent: @Composable (Any, Int) -> Unit = { scope, i ->
             when (val row = rows[i]) {
-                is RowPlan.Original -> if (row.artwork == null) {
-                    content(scope, row.index, currentComposer, 0)
-                } else {
+                is RowPlan.Original -> {
+                    val playing = currentTrack()
+                    val suppress = visibleCueTracks[row.sourceId]?.any { it.matchesPlaybackTrack(playing) } == true
                     CompositionLocalProvider(LocalCueSongArtwork provides row.artwork) {
-                        content(scope, row.index, currentComposer, 0)
+                        val composer = currentComposer
+                        if (suppress) {
+                            withoutAlbumRowAccent { content(scope, row.index, composer, 0) }
+                        } else {
+                            content(scope, row.index, composer, 0)
+                        }
                     }
                 }
                 is RowPlan.Cue -> SongRowMenu(row.song, selection, selectionState)
@@ -780,7 +841,10 @@ internal class NativeSongCue(
     private fun SongRow(song: Song, selection: NativeSongSelection?, selectionState: Any?) {
         var seeking by remember(song.key) { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
-        val theme = nativeSongRowTheme()
+        val hostTheme = nativeSongRowTheme()
+        val playing = song.track.matchesPlaybackTrack(currentTrack())
+        val accent = hostTheme.accentColor ?: Color(0xFF42BFF5).value.toLong()
+        val theme = if (playing) hostTheme.copy(titleColor = accent, detailColor = accent) else hostTheme
         val gap = theme.gap.dp
         val canSelect = selection != null && selectionState != null
         val selecting = canSelect && selection.selecting(selectionState)

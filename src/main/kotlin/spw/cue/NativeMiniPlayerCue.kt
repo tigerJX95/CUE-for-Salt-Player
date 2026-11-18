@@ -22,6 +22,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -40,6 +41,7 @@ internal class NativeMiniPlayerCue(
 ) : AutoCloseable {
     private val host = HostCurrentPlayback()
     private val display = MutableStateFlow<Display?>(null)
+    private val cueRevision = MutableStateFlow(0L)
     val taskbarTracks: Flow<Pair<Any, CueTrack>?> =
         display.map { match -> match?.let { it.item to it.track } }
     fun isCurrentItem(item: Any): Boolean = host.current.value === item
@@ -53,6 +55,7 @@ internal class NativeMiniPlayerCue(
     @Volatile private var timeStatus = "等待注册"
     @Volatile private var progressStatus = "等待注册"
     @Volatile private var rowStatus = "等待注册"
+    @Volatile private var albumAccentStatus = "等待注册"
     @Volatile private var playbackStatus = "跟踪当前分轨"
 
     init {
@@ -99,9 +102,10 @@ internal class NativeMiniPlayerCue(
                 row.render.parameterTypes.takeWhile { it != Composer::class.java }.map { it.name }, 50
             ) { call -> renderAlbumRow(call, row) }
         }
+        albumAccentStatus = installPresentation(::installAlbumRowAccentOverride)
         status("跟踪当前分轨")
         scope.launch {
-            host.current.collectLatest { item ->
+            combine(host.current, cueRevision) { item, _ -> item }.collectLatest { item ->
                 CueAlbumSequence.sourceChanged(item?.let(::audioPath))
                 textBinding?.restoreVisibleLabels()
                 display.value = null
@@ -112,6 +116,13 @@ internal class NativeMiniPlayerCue(
                     status("没有播放项")
                 }
             }
+        }
+    }
+
+    // Restart discovery even when the host keeps the same playback item and position.
+    fun refreshCue() {
+        scope.launch {
+            if (active()) cueRevision.value += 1
         }
     }
 
@@ -130,7 +141,7 @@ internal class NativeMiniPlayerCue(
     }
 
     private fun publishStatus() =
-        report("$playbackStatus · 切换 $navigationStatus · 标题 $titleStatus · 时间行 $timeStatus · 进度 $progressStatus · 整轨行 $rowStatus")
+        report("$playbackStatus · 切换 $navigationStatus · 标题 $titleStatus · 时间行 $timeStatus · 进度 $progressStatus · 整轨行 $rowStatus · 强调色 $albumAccentStatus")
 
     private fun installNavigationHook(method: Method, caller: Class<*>, step: Int): AutoCloseable =
         WorkshopApi.hookRegistrar.hookMethod(method.declaringClass.name, method.name, emptyList(), 50) {
@@ -221,6 +232,9 @@ internal class NativeMiniPlayerCue(
             runCatching { text.updateVisibleLabel(item, Role.ARTIST, artist) }
         }
     }
+
+    @Composable
+    fun currentTrack(): CueTrack? = currentDisplay()?.track
 
     @Composable
     private fun currentDisplay(): Display? =
@@ -345,18 +359,30 @@ internal class NativeMiniPlayerCue(
     private fun renderAlbumRow(call: UiHookCall, row: HostAlbumRow) {
         val args = call.arguments
         val item = args[0]
-        val match = if (active() && LocalCueAlbumRow.current) {
-            display.collectAsState().value?.takeIf { it.item === host.current.value }
+        val rowScope = LocalCueAlbumRow.current
+        val playing = if (rowScope != null && item != null) currentTrack() else null
+        val visibleCue = if (playing != null && item != null && rowScope != null) {
+            rowScope.cues[row.id(item)]?.let(CueRemoval::visibleAlbum)
         } else null
-        val audio = if (match == null || item == null) null else remember(item) {
+        val hasPlayingCueRow = visibleCue?.indexOfPlayingTrack(playing)?.let { it >= 0 } == true
+        val audio = if (playing == null || item == null || rowScope?.useTitleFallback != true || hasPlayingCueRow) {
+            null
+        } else remember(item) {
             LibraryProbe.localPath(host.path.invoke(row.converter.invoke(null, item)) as? String)
         }
-        val title = match?.track?.takeIf { it.audio == audio }?.title
+        val title = playing?.takeIf { it.audio == audio }?.title
         val rendered = remember(item, title) {
             if (title == null) item else row.withTitle(checkNotNull(item), title)
         }
         val defaults = (if (args[1] == null) 2 else 0) or (if (args[2] == null) 4 else 0)
-        invoke(row.render, rendered, args[1], args[2], currentComposer, 0, defaults)
+        val composer = currentComposer
+        if (hasPlayingCueRow) {
+            withoutAlbumRowAccent {
+                invoke(row.render, rendered, args[1], args[2], composer, 0, defaults)
+            }
+        } else {
+            invoke(row.render, rendered, args[1], args[2], composer, 0, defaults)
+        }
         if (title != null) SideEffect {
             if (rowStatus != "已绘制分轨曲名") {
                 rowStatus = "已绘制分轨曲名"
@@ -396,7 +422,10 @@ internal class NativeMiniPlayerCue(
                 types[3] == Composer::class.java && types.drop(4).all { it == Int::class.javaPrimitiveType }
         }
         val converter = HostCatalog.mediaConverter
+        private val id = track.getMethod("getId")
         private val copy = track.declaredMethods.single { it.name == "copy\$default" && it.parameterCount == 26 }
+
+        fun id(item: Any): String? = id.invoke(item) as? String
 
         fun withTitle(item: Any, title: String): Any {
             val args = copy.parameterTypes.map<Class<*>, Any?> {

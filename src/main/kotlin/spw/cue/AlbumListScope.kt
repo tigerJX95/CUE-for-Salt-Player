@@ -7,7 +7,9 @@ import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 
-internal val LocalCueAlbumRow = staticCompositionLocalOf { false }
+internal class AlbumRowScope(val cues: Map<String, AlbumCue>, val useTitleFallback: Boolean)
+
+internal val LocalCueAlbumRow = staticCompositionLocalOf<AlbumRowScope?> { null }
 
 internal class AlbumListScope(private val original: Any) : InvocationHandler {
     private class Entry(val method: Method, val args: Array<out Any?>) {
@@ -31,9 +33,11 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
 
     fun apply(
         hideWholeTrack: Boolean,
+        cues: Map<String, AlbumCue> = emptyMap(),
         appendCue: (Boolean) -> Boolean
     ) {
         recording = false
+        val rowScope = AlbumRowScope(cues, useTitleFallback = true)
         var wholeTrack: Entry? = null
         try {
             for (entry in entries) {
@@ -43,7 +47,7 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
                 if (hideWholeTrack && entry.wholeTrack) {
                     wholeTrack = entry
                 } else {
-                    val args = if (entry.wholeTrack) withAlbumRowScope(entry.args) else entry.args
+                    val args = if (entry.wholeTrack) withAlbumRowScope(entry.args, rowScope) else entry.args
                     delegate(entry.method, args)
                 }
             }
@@ -56,7 +60,8 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
         expectedIds: List<String>,
         hiddenIds: Set<String>,
         append: (String, Boolean) -> Unit,
-        appendFallback: () -> Unit
+        appendFallback: () -> Unit,
+        cues: Map<String, AlbumCue> = emptyMap()
     ) {
         recording = false
         try {
@@ -72,6 +77,7 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
                     }.getOrDefault(emptyList())
                 }
             }
+            val rowScope = AlbumRowScope(cues, useTitleFallback = false)
             val recordedIds = idsByEntry.flatten()
             val matched = expectedIds.distinct().size == expectedIds.size && recordedIds == expectedIds
             for ((index, entry) in entries.withIndex()) {
@@ -85,7 +91,13 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
                     else -> subsetArgs(entry.args, shown)
                 }
                 val applied = hide && (shown.isEmpty() || args != null)
-                if (args != null || !applied) delegate(entry.method, args ?: entry.args)
+                if (args != null || !applied) {
+                    val shownArgs = args ?: entry.args
+                    val scopedArgs = if (cues.isNotEmpty() && idsByEntry[index].isNotEmpty()) {
+                        withAlbumRowScope(shownArgs, rowScope)
+                    } else shownArgs
+                    delegate(entry.method, scopedArgs)
+                }
                 ids.forEach { id -> append(id, applied && id in hiddenIds) }
             }
         } finally {
@@ -118,10 +130,10 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun withAlbumRowScope(args: Array<out Any?>): Array<out Any?> {
+    private fun withAlbumRowScope(args: Array<out Any?>, rowScope: AlbumRowScope): Array<out Any?> {
         val nativeRow = args.last() as? (@Composable (Any, Int) -> Unit) ?: return args
         val wrapped: @Composable (Any, Int) -> Unit = { scope, index ->
-            CompositionLocalProvider(LocalCueAlbumRow provides true) { nativeRow(scope, index) }
+            CompositionLocalProvider(LocalCueAlbumRow provides rowScope) { nativeRow(scope, index) }
         }
         return Array(args.size) { index -> if (index == args.lastIndex) wrapped else args[index] }
     }

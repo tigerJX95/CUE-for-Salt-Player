@@ -43,6 +43,28 @@ class CueTimeTest {
         assertEquals(listOf("03:05", "02:10", "—"), AlbumCue(tracks, 0L).trackDurationLabels)
     }
 
+    @Test fun highlightsTheTrackAtThePlaybackPositionAndMovesAtTheCueBoundary() {
+        val first = track(0, 185)
+        val second = track(185, null).copy(number = 2)
+        val album = AlbumCue(listOf(first, second), 400_000L)
+
+        val before = cueTrackAt(album.tracks, 184_999L, album.durationMs)
+        val after = cueTrackAt(album.tracks, 185_000L, album.durationMs)
+        assertEquals(0, album.indexOfPlayingTrack(before))
+        assertEquals(1, album.indexOfPlayingTrack(after?.copy(performer = "整轨艺术家")))
+    }
+
+    @Test fun neverHighlightsAnotherDiscOrAnAbsentTrack() {
+        val first = track(0, 185)
+        val second = track(185, null).copy(number = 2)
+        val album = AlbumCue(listOf(second), 400_000L)
+
+        assertEquals(-1, album.indexOfPlayingTrack(first))
+        assertEquals(-1, album.indexOfPlayingTrack(second.copy(audio = Path.of("another-disc.flac"))))
+        assertEquals(-1, album.indexOfPlayingTrack(second.copy(startFrame = second.startFrame + 1)))
+        assertEquals(-1, album.indexOfPlayingTrack(null))
+    }
+
     private fun window(startSeconds: Long, endSeconds: Long?, fileSeconds: Long): CuePlaybackWindow =
         checkNotNull(CuePlaybackWindow.from(track(startSeconds, endSeconds), fileSeconds * 1_000))
 

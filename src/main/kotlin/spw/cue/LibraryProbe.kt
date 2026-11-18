@@ -23,6 +23,13 @@ internal data class AlbumCue(val tracks: List<CueTrack>, val durationMs: Long) {
         val window = CuePlaybackWindow.from(track, sourceEnd)
         window?.let { formatCueTime(it.durationMs) } ?: "—"
     }
+    // The mini-player may fill in a missing performer after resolving the source.
+    fun indexOfPlayingTrack(playing: CueTrack?): Int {
+        if (playing == null) return -1
+        return tracks.indexOfFirst {
+            it.matchesPlaybackTrack(playing)
+        }
+    }
 }
 
 internal data class AlbumCueSource(val trackId: String, val audio: Path, val cue: AlbumCue)
@@ -79,7 +86,7 @@ internal object LibraryProbe {
             item to audio
         }
         val uniqueSources = sources.distinctBy { it.second }
-        val matches = CueDiscovery.findAll(uniqueSources.map { it.second }, active)
+        val matches = CueDiscovery.findAll(uniqueSources.map { it.second }, active = active)
         return uniqueSources.mapNotNull { (item, audio) ->
             val sheet = matches[audio]?.sheet ?: return@mapNotNull null
             val tracks = sheet.tracks.filter { it.audio == audio }

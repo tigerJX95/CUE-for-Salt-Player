@@ -7,6 +7,8 @@ import androidx.compose.runtime.currentComposer
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
+import com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi
+import com.xuncorp.spw.workshop.api.WorkshopApi
 import java.lang.classfile.Opcode
 import java.lang.classfile.constantpool.StringEntry
 import java.lang.classfile.instruction.ConstantInstruction.LoadConstantInstruction
@@ -80,4 +82,30 @@ internal fun nativeSongRowTheme(): SongRowTheme {
     )
     SideEffect { lastHostSongRowTheme.value = theme }
     return theme
+}
+
+private val suppressAlbumRowAccent = ThreadLocal<Boolean>()
+
+@OptIn(UnstableSpwWorkshopApi::class)
+internal fun installAlbumRowAccentOverride(): AutoCloseable {
+    val binding = checkNotNull(songThemeBinding) { "未找到原生曲目行强调色" }
+    val accent = binding.accentColor
+    return WorkshopApi.hookRegistrar.hookMethod(accent.declaringClass.name, accent.name, emptyList(), 50) {
+        before { call ->
+            if (suppressAlbumRowAccent.get() != true || call.isOriginalSkipped) return@before
+            val colors = call.thisObject ?: return@before
+            val neutral = runCatching { binding.titleColor.invoke(colors) as Long }.getOrNull()
+            if (neutral != null) call.setResult(neutral)
+        }
+    }
+}
+
+internal fun withoutAlbumRowAccent(render: () -> Unit) {
+    val previous = suppressAlbumRowAccent.get()
+    suppressAlbumRowAccent.set(true)
+    try {
+        render()
+    } finally {
+        if (previous == null) suppressAlbumRowAccent.remove() else suppressAlbumRowAccent.set(previous)
+    }
 }

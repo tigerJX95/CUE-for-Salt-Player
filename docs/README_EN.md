@@ -4,11 +4,13 @@
 
 A desktop Salt Player plugin for external CUE sheets and CUE data embedded in FLAC files. Browse, search, and play individual tracks in Album Details and Songs.
 
-**Current version v0.4.0**
+**Current version v0.5.0 · 2026-11-18**
 
-- **Playback across discs.** Start a CUE track in Album Details to use Previous and Next across discs. Playback also continues to the next adjacent disc with CUE tracks at the end of the current disc.
-- **Refresh CUE.** After editing or replacing a CUE sheet, choose **Refresh CUE** in Album Details to update the track lists, Songs, and album count.
-- **Track management.** Restore the selected track, all affected tracks in the current album, or every hidden and removed track. The CUE window follows Salt Player styling and shows each track’s duration in one centered column.
+- **Playback highlighting.** Album Details and Songs use the accent color for the playing CUE track, following track and disc changes. Its original audio row uses the normal color while the CUE track is visible.
+- **Search in the CUE window.** Filter by title or artist using multiple keywords and see the matching count. Playback and restoration still target the original track. Clear the search to restore the full list.
+- **External CUE cache.** Library snapshots reuse parsing results for unchanged files. The cache limits file and track counts and removes files no longer encountered during scanning.
+- **Scoped refresh and original-entry restoration.** Refreshing an album rebuilds CUE entries only for affected audio files, including multiple library records pointing to the same file. The original audio entry returns if its CUE match is lost.
+- **Refresh playback metadata.** Refresh CUE forces the affected files to be read again and re-reads the current playback file’s CUE data, updating the title, artist, and track time range without switching audio files first.
 
 [Version history](CHANGELOG_EN.md)
 
@@ -35,6 +37,16 @@ A CD rip can be stored as one audio file, with its track titles and start positi
 2. Grant the requested shortcut, library read, and method and UI hook permissions.
 3. Add the album audio file to the library. Place an external `.cue` file in the same folder, or add a FLAC file that already contains CUE data.
 4. Open the album and select a CUE track in Album Details. You can also search by track title and play it from Songs.
+
+### Playback highlighting and refreshing
+
+The accent color follows CUE track changes and disc transitions in Album Details and Songs. Pausing keeps the current track highlighted. When the current CUE track is visible, its full-length audio entry uses the normal text color.
+
+After editing a title, artist, track count, or timestamp, choose **Refresh CUE** in Album Details or Manage tracks. This forces a re-read even when an editor preserves the CUE file’s size and modification time. Existing entries from other albums are reused. An audio file’s original entry is restored if its CUE match is lost. The current playback file’s CUE data is also re-read to update its title, artist, and track time range.
+
+### Filter tracks in the CUE window
+
+Press **Ctrl+Alt+U** and enter a title or artist in the search field. Matching is case-insensitive; separate multiple keywords with spaces. The counter shows matches and total tracks. Double-clicking a result and restoring the selected track both use its original position in the CUE sheet. If the selection is filtered out, jumping to its start and restoring that selection are disabled until you select a visible track or clear the search. Restore album and Restore all keep their original scope.
 
 ### Remove, hide, and restore CUE tracks
 
@@ -104,6 +116,6 @@ Use **JDK 25**. The Gradle Wrapper uses **Gradle 9.8.0**. Run the appropriate co
 | Windows | `build.cmd` |
 | Linux | `bash gradlew clean test plugin` |
 
-The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.4.0.spmod`.
+The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.5.0.spmod`.
 
 Licensed under the [MIT License](../LICENSE).
