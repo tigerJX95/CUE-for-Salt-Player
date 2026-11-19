@@ -55,6 +55,7 @@ internal class AlbumHookTarget(
             val decorators = HostCatalog.candidates("AlbumContentScreen.kt:").map(HostCatalog::type)
             val gridCovers = HostCatalog.candidates("AlbumCover (AlbumCover.kt:")
             val songCovers = HostCatalog.candidates("TrackItemContent (TrackItem.kt:")
+            val artistCovers = HostCatalog.candidates("ArtistCoverImage (ArtistCoverImage.kt:")
             val decorator = checkNotNull(decorators.singleOrNull { type ->
                 type.declaredMethods.any {
                     !Modifier.isStatic(it.modifiers) && it.returnType == Void.TYPE &&
@@ -89,7 +90,7 @@ internal class AlbumHookTarget(
                     it.parameterTypes.toList() == listOf(scope, Any::class.java, Function3::class.java)
             }) { "无法确认列表追加入口" }
             val playback = NativeAlbumPlayback.resolve()
-            val cover = NativeCoverFallback.resolve(decorator, groupType, gridCovers, songCovers)
+            val cover = NativeCoverFallback.resolve(decorator, groupType, gridCovers, songCovers, artistCovers)
             return AlbumHookTarget(builder, decorator, entities, track.getMethod("getId"), item, playback, cover)
         }
     }

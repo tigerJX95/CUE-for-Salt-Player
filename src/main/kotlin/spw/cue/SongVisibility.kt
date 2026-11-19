@@ -10,6 +10,7 @@ import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 import java.util.HexFormat
+import java.lang.ref.WeakReference
 
 internal data class SongVisibilityRecords(
     val hiddenInSongs: Set<String> = emptySet(),
@@ -23,9 +24,10 @@ internal data class SongVisibilityRecords(
     }
 }
 
-internal class SongVisibility(private val path: Path) {
-    private val removedPath = path.resolveSibling("removed-cue-tracks.txt")
-    private var hiddenKeys = read(path)
+internal class SongVisibility(path: Path) {
+    private val path = path.toAbsolutePath().normalize()
+    private val removedPath = this.path.resolveSibling("removed-cue-tracks.txt")
+    private var hiddenKeys = read(this.path)
     private var removedKeys = try {
         read(removedPath)
     } catch (_: java.io.IOException) {
@@ -39,58 +41,76 @@ internal class SongVisibility(private val path: Path) {
     private val keys = MutableStateFlow(hiddenKeys + removedKeys)
     val hidden = keys.asStateFlow()
 
+    init {
+        synchronized(storageLock) {
+            observers.removeAll { it.get() == null }
+            val previous = observers.mapNotNull { it.get() }.firstOrNull { it.path == this.path }
+            observers.add(WeakReference(this))
+            // Another instance may have written while this instance was being constructed.
+            val latestRemoved = try { read(removedPath) }
+                catch (_: java.io.IOException) { previous?.records?.value?.removedFromLibrary ?: removedKeys }
+                catch (_: SecurityException) { previous?.records?.value?.removedFromLibrary ?: removedKeys }
+            publishSnapshot(SongVisibilityRecords(read(this.path), latestRemoved))
+        }
+    }
+
     fun hide(key: String) = hide(setOf(key))
 
-    @Synchronized
-    fun hide(entries: Set<String>) {
-        val updated = hiddenKeys + entries
-        if (updated == hiddenKeys) return
-        write(path, updated)
-        hiddenKeys = updated
-        publishVisibility()
-    }
+    fun hide(entries: Set<String>) = update { it.copy(hiddenInSongs = it.hiddenInSongs + entries) }
 
     fun remove(key: String) = remove(setOf(key))
 
-    @Synchronized
-    fun remove(entries: Set<String>) {
-        // Re-read on each write so a temporary failure never overwrites earlier removals.
-        val existing = read(removedPath)
-        val updated = existing + entries
-        if (updated != existing) write(removedPath, updated)
-        publishRemoved(updated)
-    }
+    fun remove(entries: Set<String>) = update { it.copy(removedFromLibrary = it.removedFromLibrary + entries) }
 
-    @Synchronized
     fun restoreAll() = restoreMatching(null)
 
-    @Synchronized
     fun restore(entries: Set<String>) {
         if (entries.isNotEmpty()) restoreMatching(entries)
     }
 
-    private fun restoreMatching(entries: Set<String>?) {
-        val existingRemoved = read(removedPath)
-        val updatedRemoved = if (entries == null) emptySet() else existingRemoved - entries
-        if (updatedRemoved != existingRemoved) write(removedPath, updatedRemoved)
-        publishRemoved(updatedRemoved)
-        val updatedHidden = if (entries == null) emptySet() else hiddenKeys - entries
-        if (updatedHidden != hiddenKeys) {
-            write(path, updatedHidden)
-            hiddenKeys = updatedHidden
-            publishVisibility()
+    private fun restoreMatching(entries: Set<String>?) = update { current ->
+        if (entries == null) SongVisibilityRecords() else SongVisibilityRecords(
+            current.hiddenInSongs - entries, current.removedFromLibrary - entries
+        )
+    }
+
+    fun refresh() {
+        synchronized(storageLock) { publishSnapshot(readSnapshot()) }
+    }
+
+    private fun readSnapshot() = SongVisibilityRecords(read(path), read(removedPath))
+
+    private fun update(change: (SongVisibilityRecords) -> SongVisibilityRecords) {
+        synchronized(storageLock) {
+            // Always merge against disk, never a previously loaded instance's cached sets.
+            val before = readSnapshot()
+            val after = change(before)
+            var persisted = before
+            if (after.hiddenInSongs != before.hiddenInSongs) {
+                write(path, after.hiddenInSongs)
+                persisted = persisted.copy(hiddenInSongs = after.hiddenInSongs)
+                publishSnapshot(persisted)
+            }
+            if (after.removedFromLibrary != before.removedFromLibrary) {
+                write(removedPath, after.removedFromLibrary)
+                persisted = persisted.copy(removedFromLibrary = after.removedFromLibrary)
+            }
+            publishSnapshot(persisted)
         }
     }
 
-    private fun publishRemoved(updated: Set<String>) {
-        if (removedKeys != updated) CueRemoval.publishAlbum(albumRemoved, updated)
-        removedKeys = updated
-        publishVisibility()
+    private fun publishSnapshot(snapshot: SongVisibilityRecords) {
+        observers.removeAll { it.get() == null }
+        val targets = observers.mapNotNull { it.get() }.filter { it.path == path }
+        targets.forEach { it.acceptSnapshot(snapshot) }
     }
 
-    private fun publishVisibility() {
-        records.value = SongVisibilityRecords(hiddenKeys, removedKeys)
-        keys.value = hiddenKeys + removedKeys
+    private fun acceptSnapshot(snapshot: SongVisibilityRecords) {
+        hiddenKeys = snapshot.hiddenInSongs
+        if (removedKeys != snapshot.removedFromLibrary) CueRemoval.publishAlbum(albumRemoved, snapshot.removedFromLibrary)
+        removedKeys = snapshot.removedFromLibrary
+        records.value = snapshot
+        keys.value = snapshot.hiddenInSongs + snapshot.removedFromLibrary
     }
 
     private fun write(path: Path, updated: Set<String>) {
@@ -122,6 +142,8 @@ internal class SongVisibility(private val path: Path) {
 
     companion object {
         private val keyPattern = Regex("[0-9a-f]{64}")
+        private val storageLock = Any()
+        private val observers = mutableListOf<WeakReference<SongVisibility>>()
 
         fun key(track: CueTrack): String {
             val path = track.audio.toAbsolutePath().normalize().toUri().toASCIIString()

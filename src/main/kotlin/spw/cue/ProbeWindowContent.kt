@@ -1,8 +1,10 @@
 package spw.cue
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -31,6 +34,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -40,6 +44,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
@@ -56,6 +63,7 @@ import androidx.compose.ui.unit.sp
 
 @Composable
 internal fun ProbeWindowContent(
+    playingTrack: CueTrack?,
     version: String,
     source: String?,
     result: ProbeResult?,
@@ -84,7 +92,25 @@ internal fun ProbeWindowContent(
     val colors = probeColors(isSystemInDarkTheme(), probeHostTheme())
     val tracks = result?.sheet?.tracks.orEmpty()
     var query by remember(result) { mutableStateOf("") }
-    val filteredTracks = remember(tracks, query) { filterCueTracks(tracks, query) }
+    var filter by remember(result) { mutableStateOf(CueTrackStatusFilter.All) }
+    val trackKeys = remember(tracks) { tracks.map(SongVisibility::key) }
+    val filteredTracks = remember(tracks, trackKeys, query, filter, visibility) {
+        filterManagedCueTracks(tracks, trackKeys, query, filter, visibility)
+    }
+    var checkedKeys by remember(result, query, filter) { mutableStateOf(emptySet<String>()) }
+    val rows = remember(tracks, trackKeys, filteredTracks) { cueWindowRows(tracks, trackKeys, filteredTracks) }
+    val playingIndex = cueWindowPlayingIndex(tracks, playingTrack)
+    var locateRevision by remember(result) { mutableStateOf(0L) }
+    var locateTarget by remember(result) { mutableStateOf(-1) }
+    var handledLocate by remember(result) { mutableStateOf(0L) }
+    val listState = key(result) { rememberLazyListState() }
+    LaunchedEffect(result, query, filter, locateRevision) {
+        val target = if (handledLocate != locateRevision) {
+            handledLocate = locateRevision
+            rows.indexOfFirst { it is CueWindowRow.Track && it.index == locateTarget }.coerceAtLeast(0)
+        } else 0
+        listState.scrollToItem(target)
+    }
     val selectedVisible = filteredTracks.any { it.index == selectedRow }
     Column(
         Modifier.fillMaxSize().background(colors.background).padding(horizontal = 20.dp, vertical = 18.dp),
@@ -168,13 +194,41 @@ internal fun ProbeWindowContent(
                     ProbeText("${filteredTracks.size} / ${tracks.size} 轨", colors.secondary, 12)
                 }
             }
-            val trackKeys = remember(tracks) { tracks.map(SongVisibility::key) }
+            if (tracks.isNotEmpty()) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    CueTrackStatusFilter.entries.forEach { option ->
+                        ProbeAction(option.label, colors, enabled = !busy, primary = filter == option) { filter = option }
+                    }
+                    Box(Modifier.weight(1f))
+                    ProbeAction("定位播放", colors, enabled = !busy && playingIndex >= 0) {
+                        query = ""
+                        filter = CueTrackStatusFilter.All
+                        locateTarget = playingIndex
+                        locateRevision += 1
+                        onSelect(playingIndex)
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    ProbeAction("全选结果", colors, enabled = !busy && filteredTracks.isNotEmpty()) {
+                        checkedKeys = filteredTracks.mapTo(linkedSetOf()) { trackKeys[it.index] }
+                    }
+                    ProbeAction("清除勾选", colors, enabled = !busy && checkedKeys.isNotEmpty()) { checkedKeys = emptySet() }
+                    ProbeText("已勾选 ${checkedKeys.size} 轨 · 点击左侧方框可多选", colors.secondary, 13)
+                }
+            }
             if (visibility.hiddenInSongs.isNotEmpty() || visibility.removedFromLibrary.isNotEmpty()) {
-                val selectedKey = trackKeys.getOrNull(selectedRow)?.takeIf { selectedVisible && visibility.label(it) != null }
                 val albumKeys = trackKeys.filterTo(mutableSetOf()) { visibility.label(it) != null }
+                val recovery = cueRecoveryPlan(checkedKeys, filteredTracks, trackKeys, visibility)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ProbeAction("恢复所选分轨", colors, enabled = !busy && selectedKey != null) {
-                        selectedKey?.let { onRestoreHiddenSongs(setOf(it)) }
+                    ProbeAction("恢复勾选分轨（${recovery.checked.size}）", colors, enabled = !busy && recovery.checked.isNotEmpty()) {
+                        onRestoreHiddenSongs(recovery.checked)
+                        checkedKeys = emptySet()
+                    }
+                    ProbeAction("恢复当前结果（${recovery.visible.size}）", colors, enabled = !busy && recovery.visible.isNotEmpty()) {
+                        onRestoreHiddenSongs(recovery.visible)
+                        checkedKeys = emptySet()
                     }
                     if (managingAlbum) {
                         ProbeAction("恢复本专辑", colors, enabled = !busy && albumKeys.isNotEmpty()) {
@@ -202,28 +256,47 @@ internal fun ProbeWindowContent(
                             .padding(start = 16.dp, end = 24.dp).height(38.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        ProbeText("选择", colors.secondary, 12, Modifier.width(34.dp))
                         ProbeText("轨号", colors.secondary, 12, Modifier.width(46.dp))
                         ProbeText("曲名 / 艺术家", colors.secondary, 12, Modifier.weight(1f))
                         TrackDurationCell("时长", colors.secondary)
                     }
-                    key(result, query) {
-                        val selectedPosition = filteredTracks.indexOfFirst { it.index == selectedRow }.coerceAtLeast(0)
-                        val listState = rememberLazyListState(initialFirstVisibleItemIndex = selectedPosition)
+                    key(result) {
                         Box(Modifier.weight(1f)) {
                             LazyColumn(
                                 modifier = Modifier.fillMaxSize().padding(start = 6.dp, end = 14.dp),
                                 state = listState
                             ) {
-                                itemsIndexed(filteredTracks, key = { _, entry -> trackKeys[entry.index] }) { _, entry ->
-                                    val index = entry.index
-                                    val track = entry.value
-                                    val sourceDuration = result?.matches?.get(track.audio)?.duration
-                                        ?.takeIf { it > 0 } ?: track.endMs ?: 0L
-                                    ProbeTrackRow(
-                                        track, sourceDuration, index == selectedRow, !busy, colors,
-                                        visibilityLabel = visibility.label(trackKeys[index]),
-                                        onSelect = { onSelect(index) }, onPlay = { onPlay(index) }
-                                    )
+                                itemsIndexed(rows, key = { _, row ->
+                                    when (row) {
+                                        is CueWindowRow.Disc -> "disc:${row.audio}"
+                                        is CueWindowRow.Track -> row.key
+                                    }
+                                }) { _, row ->
+                                    when (row) {
+                                        is CueWindowRow.Disc -> Row(
+                                            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            ProbeText("光盘 ${row.number} · ${row.audio.fileName}", colors.secondary, 13,
+                                                Modifier.weight(1f).padding(end = 8.dp), lines = 1)
+                                            ProbeText("${row.matchedCount} / ${row.totalCount} 轨", colors.secondary, 12)
+                                        }
+                                        is CueWindowRow.Track -> {
+                                            val sourceDuration = result?.matches?.get(row.track.audio)?.duration
+                                                ?.takeIf { it > 0 } ?: row.track.endMs ?: 0L
+                                            ProbeTrackRow(
+                                                row.track, sourceDuration, row.index == selectedRow, !busy, colors,
+                                                visibilityLabel = visibility.label(row.key),
+                                                playing = row.track.matchesPlaybackTrack(playingTrack),
+                                                checked = row.key in checkedKeys,
+                                                onToggle = {
+                                                    checkedKeys = if (row.key in checkedKeys) checkedKeys - row.key else checkedKeys + row.key
+                                                },
+                                                onSelect = { onSelect(row.index) }, onPlay = { onPlay(row.index) }
+                                            )
+                                        }
+                                    }
                                 }
                             }
                             VerticalScrollbar(
@@ -253,6 +326,9 @@ private fun ProbeTrackRow(
     enabled: Boolean,
     colors: ProbeColors,
     visibilityLabel: String?,
+    playing: Boolean,
+    checked: Boolean,
+    onToggle: () -> Unit,
     onSelect: () -> Unit,
     onPlay: () -> Unit
 ) {
@@ -272,18 +348,32 @@ private fun ProbeTrackRow(
             .heightIn(min = 50.dp).padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Box(Modifier.width(34.dp), contentAlignment = Alignment.CenterStart) {
+            Canvas(Modifier.size(28.dp).semantics { contentDescription = "勾选 ${track.title}" }
+                .toggleable(value = checked, enabled = enabled, role = Role.Checkbox) { onToggle() }) {
+                val inset = 3.dp.toPx()
+                val width = 1.5.dp.toPx()
+                val color = if (checked) colors.accent else colors.secondary
+                drawRoundRect(color, Offset(inset, inset), androidx.compose.ui.geometry.Size(size.width - inset * 2, size.height - inset * 2),
+                    androidx.compose.ui.geometry.CornerRadius(3.dp.toPx()), style = Stroke(width))
+                if (checked) {
+                    drawLine(color, Offset(size.width * .28f, size.height * .51f), Offset(size.width * .44f, size.height * .67f), width, StrokeCap.Round)
+                    drawLine(color, Offset(size.width * .44f, size.height * .67f), Offset(size.width * .74f, size.height * .34f), width, StrokeCap.Round)
+                }
+            }
+        }
         ProbeText(
             track.number.toString().padStart(2, '0'),
-            if (selected) colors.accent else colors.secondary, 14, Modifier.width(46.dp),
+            if (selected || playing) colors.accent else colors.secondary, 14, Modifier.width(46.dp),
             weight = if (selected) FontWeight.SemiBold else FontWeight.Normal
         )
         Column(Modifier.weight(1f).padding(end = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            ProbeText(track.title, colors.text, 14, lines = 1, weight = FontWeight.Medium)
-            val details = listOfNotNull(track.performer, visibilityLabel).joinToString(" · ")
+            ProbeText(track.title, if (playing) colors.accent else colors.text, 14, lines = 1, weight = FontWeight.Medium)
+            val details = listOfNotNull(track.performer, visibilityLabel, "播放中".takeIf { playing }).joinToString(" · ")
             if (details.isNotEmpty()) ProbeText(details, colors.secondary, 12, lines = 1)
         }
         val duration = CuePlaybackWindow.from(track, sourceDuration)?.durationMs
-        TrackDurationCell(duration?.let(::formatCueTime) ?: "—", colors.secondary)
+        TrackDurationCell(duration?.let(::formatCueTime) ?: "—", if (playing) colors.accent else colors.secondary)
     }
 }
 

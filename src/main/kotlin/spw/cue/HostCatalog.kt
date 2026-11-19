@@ -27,10 +27,12 @@ internal object HostCatalog {
 
     private val markers = listOf(
         "AlbumContentScreen.kt:", "TrackLazyColumn (TrackLazyColumn.kt:", "TrackScreen (TrackScreen.kt:",
-        "toPiscesMediaItem", "AlbumCover (AlbumCover.kt:", "TrackItemContent (TrackItem.kt:",
+        "toPiscesMediaItem", "AlbumCover (AlbumCover.kt:", "ArtistCoverImage (ArtistCoverImage.kt:",
+        "TrackItemContent (TrackItem.kt:",
+        "TrackPage (ArtistContentScreen.kt:", "ArtistContentScreen (ArtistContentScreen.kt:",
         "MiniPlayer (MiniPlayerContent.kt:", "MiniPlayerCoverItem (MiniPlayerCoverItem.kt:",
         "MiniPlayerControl (MiniPlayerControl.kt:", "MiniTimeSeekbar (MiniTime.kt:", "MiniTimeText (MiniTime.kt:",
-        "MainWindow (MainWindow.kt:", "updateMainWindowVisible"
+        "MainWindow (MainWindow.kt:", "updateMainWindowVisible", "Failed to update taskbar progress"
     )
     private val index by lazy { scan() }
 
@@ -114,6 +116,43 @@ internal object HostCatalog {
             } ?: 0
         }
         check(count == 1) { "宿主调用点缺失或不唯一（$count）" }
+    }
+
+    // Find actual call sites by the resolved JVM signature, never by obfuscated class names.
+    fun callersOf(method: Method): List<Class<*>> {
+        val resource = track.getResource(track.simpleName + ".class")
+        val jar = resource?.openConnection() as? JarURLConnection
+        val location = jar?.jarFileURL ?: checkNotNull(track.protectionDomain.codeSource?.location)
+        check(location.protocol == "file")
+        val owner = method.declaringClass.name.replace('.', '/')
+        val descriptor = method.hostDescriptor()
+        val ownerBytes = owner.toByteArray(Charsets.UTF_8).toString(Charsets.ISO_8859_1)
+        val descriptorBytes = descriptor.toByteArray(Charsets.UTF_8).toString(Charsets.ISO_8859_1)
+        var scannedBytes = 0L
+        return buildList {
+            ZipFile(Path.of(location.toURI()).toFile()).use { zip ->
+                for (entry in zip.entries()) {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                    val name = entry.name
+                    if (!name.endsWith(".class") || entry.size !in 1..262_144 ||
+                        !(name.startsWith("androidx/compose/ui/") && name.count { it == '/' } == 3 ||
+                            name.startsWith("com/xuncorp/voxzen/ui/"))) continue
+                    scannedBytes += entry.size
+                    check(scannedBytes <= 128L * 1024 * 1024)
+                    val bytes = zip.getInputStream(entry).use { it.readNBytes(entry.size.toInt() + 1) }
+                    check(bytes.size.toLong() == entry.size)
+                    val symbols = bytes.toString(Charsets.ISO_8859_1)
+                    if (ownerBytes !in symbols || descriptorBytes !in symbols) continue
+                    val model = ClassFile.of().parse(bytes)
+                    if (model.methods().any { candidate ->
+                        candidate.code().orElse(null)?.elementList()?.filterIsInstance<InvokeInstruction>()?.any {
+                            it.owner().asInternalName() == owner && it.name().stringValue() == method.name &&
+                                it.type().stringValue() == descriptor
+                        } == true
+                    }) add(type(name.removeSuffix(".class")))
+                }
+            }
+        }
     }
 
     // Bind data-class accessors by the constructor's argument slots and the fields they write.

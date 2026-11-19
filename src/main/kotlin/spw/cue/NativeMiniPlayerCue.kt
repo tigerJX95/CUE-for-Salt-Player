@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import java.lang.reflect.InvocationTargetException
@@ -37,10 +38,15 @@ import java.awt.EventQueue
 @OptIn(UnstableSpwWorkshopApi::class)
 internal class NativeMiniPlayerCue(
     private val active: () -> Boolean,
+    private val removed: () -> Set<String> = { emptySet() },
     private val report: (String) -> Unit
 ) : AutoCloseable {
     private val host = HostCurrentPlayback()
+    private var shuffle: NativeCueShuffle? = null
+    private var shuffleStatus = "等待注册"
+    private val queueEndProbe = { shuffle?.ownsNaturalEnd() == true }
     private val display = MutableStateFlow<Display?>(null)
+    private val discLink = CueDiscLink()
     private val cueRevision = MutableStateFlow(0L)
     val taskbarTracks: Flow<Pair<Any, CueTrack>?> =
         display.map { match -> match?.let { it.item to it.track } }
@@ -54,11 +60,22 @@ internal class NativeMiniPlayerCue(
     @Volatile private var titleStatus = "等待注册"
     @Volatile private var timeStatus = "等待注册"
     @Volatile private var progressStatus = "等待注册"
+    @Volatile private var taskbarProgressStatus = ""
     @Volatile private var rowStatus = "等待注册"
     @Volatile private var albumAccentStatus = "等待注册"
     @Volatile private var playbackStatus = "跟踪当前分轨"
 
     init {
+        PlaybackProbe.playing = null
+        try {
+            shuffle = NativeCueShuffle(host, active, removed) { message -> shuffleStatus = message; publishStatus() }
+            shuffleStatus = "已连接宿主播放模式"
+        } catch (error: Exception) {
+            shuffleStatus = "随机接入未就绪：${error.cause?.message ?: error.message}"
+        } catch (error: LinkageError) {
+            shuffleStatus = "随机接入签名不匹配：${error.javaClass.simpleName}"
+        }
+        PlaybackProbe.queuePlaybackOwnsEnd = queueEndProbe
         navigationStatus = installPresentation {
             val caller = HostCatalog.owner("MiniPlayerControl (MiniPlayerControl.kt:")
             val controller = HostCatalog.type("com.xuncorp.voxzen.service.PlaybackController")
@@ -94,6 +111,9 @@ internal class NativeMiniPlayerCue(
                 listOf(Modifier::class.java.name), 50
             ) { call -> renderProgress(call, seekbar) }
         }
+        if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) {
+            taskbarProgressStatus = " · 任务栏进度 " + installPresentation(::installTaskbarProgress)
+        }
         rowStatus = installPresentation {
             val row = HostAlbumRow()
             HostCatalog.requireSingleCall(row.caller, row.render)
@@ -109,6 +129,7 @@ internal class NativeMiniPlayerCue(
                 CueAlbumSequence.sourceChanged(item?.let(::audioPath))
                 textBinding?.restoreVisibleLabels()
                 display.value = null
+                discLink.publish(null, null)
                 if (item != null && active()) {
                     status("正在查找当前音频的 CUE")
                     follow(item)
@@ -122,7 +143,7 @@ internal class NativeMiniPlayerCue(
     // Restart discovery even when the host keeps the same playback item and position.
     fun refreshCue() {
         scope.launch {
-            if (active()) cueRevision.value += 1
+            if (active()) { cueRevision.value += 1; shuffle?.refresh() }
         }
     }
 
@@ -141,12 +162,30 @@ internal class NativeMiniPlayerCue(
     }
 
     private fun publishStatus() =
-        report("$playbackStatus · 切换 $navigationStatus · 标题 $titleStatus · 时间行 $timeStatus · 进度 $progressStatus · 整轨行 $rowStatus · 强调色 $albumAccentStatus")
+        report("$playbackStatus · 切换 $navigationStatus · 标题 $titleStatus · 时间行 $timeStatus · 进度 $progressStatus · 整轨行 $rowStatus · 强调色 $albumAccentStatus · 队列 $shuffleStatus$taskbarProgressStatus")
+
+    private fun installTaskbarProgress(): AutoCloseable {
+        val method = HostTaskbarProgress.resolve()
+        return WorkshopApi.hookRegistrar.hookMethod(
+            method.declaringClass.name, method.name, method.parameterTypes.map { it.name }, 50
+        ) {
+            before { call ->
+                if (!active() || call.isOriginalSkipped) return@before
+                val match = display.value?.takeIf { host.current.value === it.item } ?: return@before
+                if (HostTaskbarProgress.update(call, match.tracks) &&
+                    taskbarProgressStatus != " · 任务栏进度 已按分轨显示"
+                ) {
+                    taskbarProgressStatus = " · 任务栏进度 已按分轨显示"
+                    publishStatus()
+                }
+            }
+        }
+    }
 
     private fun installNavigationHook(method: Method, caller: Class<*>, step: Int): AutoCloseable =
         WorkshopApi.hookRegistrar.hookMethod(method.declaringClass.name, method.name, emptyList(), 50) {
             before { call ->
-                if (!active()) return@before
+                if (!active() || call.isOriginalSkipped || shuffle?.randomMode() == true) return@before
                 val match = display.value?.takeIf { it.item === host.current.value } ?: return@before
                 if (!stack.walk { frames -> frames.limit(28).anyMatch { it.className == caller.name } }) return@before
                 val progress = host.progress.value ?: return@before
@@ -199,11 +238,27 @@ internal class NativeMiniPlayerCue(
             if (track.performer == null) track.copy(performer = fallback) else track
         }
 
+        var linkedStart: Long? = null
         host.progress.map { progress ->
             if (progress == null) null else {
                 val position = host.position.invoke(progress) as Long
                 val duration = host.duration.invoke(progress) as Long
                 cueTrackAt(tracks, position, duration)
+            }
+        }.onEach { track ->
+            if (!active() || host.current.value !== item || linkedStart == track?.startFrame) return@onEach
+            if (track == null) {
+                discLink.publish(null, null)
+                linkedStart = null
+            } else {
+                // Use the same path as the disc plugin. Retry on the next
+                // progress event if the Workshop item is still transitioning.
+                val playbackItem = runCatching { LibraryProbe.current() }.getOrNull()
+                val path = playbackItem?.takeIf { LibraryProbe.pathOf(it) == audio }?.path
+                if (path != null) {
+                    discLink.publish(path, track.startFrame)
+                    linkedStart = track.startFrame
+                }
             }
         }.distinctUntilChanged().collect { track ->
             if (active() && host.current.value === item) {
@@ -400,7 +455,11 @@ internal class NativeMiniPlayerCue(
     }
 
     override fun close() {
+        discLink.close()
         CueAlbumSequence.clear()
+        if (PlaybackProbe.queuePlaybackOwnsEnd === queueEndProbe) PlaybackProbe.queuePlaybackOwnsEnd = null
+        shuffle?.close()
+        shuffle = null
         scope.cancel()
         EventQueue.invokeLater { textBinding?.restoreVisibleLabels() }
         for (hook in hooks.asReversed()) runCatching { hook.close() }

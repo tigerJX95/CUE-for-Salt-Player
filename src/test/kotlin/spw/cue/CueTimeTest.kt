@@ -18,6 +18,16 @@ class CueTimeTest {
         assertEquals(120_000L, second.durationMs)
     }
 
+    @Test fun windowsTaskbarUsesTrackElapsedAndLengthAtBoundaries() {
+        val tracks = listOf(track(0, 300), track(300, 420), track(420, null))
+        assertEquals(299_999L to 300_000L, taskbarCueTimes(tracks, 299_999, 900_000))
+        assertEquals(0L to 120_000L, taskbarCueTimes(tracks, 300_000, 900_000))
+        assertEquals(60_000L to 120_000L, taskbarCueTimes(tracks, 360_000, 900_000))
+        assertEquals(0L to 480_000L, taskbarCueTimes(tracks, 420_000, 900_000))
+        assertEquals(480_000L to 480_000L, taskbarCueTimes(tracks, 900_000, 900_000))
+        assertNull(taskbarCueTimes(emptyList(), 300_000, 900_000))
+    }
+
     @Test fun seekUsesTheCurrentTrackBounds() {
         val second = window(300, 420, 900)
         assertEquals(300_000L, second.seekPosition(0f))

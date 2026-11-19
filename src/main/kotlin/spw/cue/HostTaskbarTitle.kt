@@ -1,8 +1,31 @@
 package spw.cue
 
+import com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi
+import com.xuncorp.spw.workshop.api.hook.MethodHookParam
 import java.awt.Frame
 import java.lang.classfile.Opcode
 import java.lang.reflect.Modifier
+
+@OptIn(UnstableSpwWorkshopApi::class)
+internal object HostTaskbarProgress {
+    fun resolve() = HostCatalog.tracedMethods("Failed to update taskbar progress").single { method ->
+        !Modifier.isStatic(method.modifiers) && method.hostDescriptor() == "(ZJJ)V" &&
+            HostCatalog.calls(method).any { it.owner().asInternalName().startsWith("com/xuncorp/spc/windowstaskbar/") }
+    }
+
+    fun update(call: MethodHookParam, tracks: List<CueTrack>): Boolean {
+        if (call.isOriginalSkipped) return false
+        val position = call.args[1] as? Long ?: return false
+        val duration = call.args[2] as? Long ?: return false
+        val (elapsed, length) = taskbarCueTimes(tracks, position, duration) ?: return false
+        if (elapsed == position && length == duration) return false
+        call.args[1] = elapsed
+        call.args[2] = length
+        // Explicitly invoke the host; updating the hook frame alone leaves its original arguments unchanged.
+        call.setResult(call.invokeOriginal())
+        return true
+    }
+}
 
 internal class HostTaskbarTitle {
     private val mainWindow = HostCatalog.owner("MainWindow (MainWindow.kt:")

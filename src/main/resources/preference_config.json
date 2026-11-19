@@ -8,7 +8,7 @@
           "key": "showCueSongs",
           "type": "switch",
           "title": "在歌曲页显示 CUE 分轨",
-          "summary": "默认在歌曲页单独显示 CUE 曲目，可搜索并直接点播。自动更新，重启后继续生效。",
+          "summary": "在主歌曲页和艺术家详情的歌曲列表中显示 CUE 曲目。主歌曲页支持搜索；修改后自动更新，重启后继续生效。",
           "default_value": true
         },
         {

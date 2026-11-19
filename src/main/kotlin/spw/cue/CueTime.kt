@@ -22,6 +22,12 @@ internal fun adjacentCueTrack(tracks: List<CueTrack>, current: CueTrack, duratio
     return tracks.getOrNull(index + step)?.takeIf { it.startMs in 0 until durationMs }
 }
 
+internal fun taskbarCueTimes(tracks: List<CueTrack>, positionMs: Long, durationMs: Long): Pair<Long, Long>? {
+    val track = cueTrackAt(tracks, positionMs, durationMs) ?: return null
+    val window = CuePlaybackWindow.from(track, durationMs) ?: return null
+    return window.elapsedMs(positionMs) to window.durationMs
+}
+
 @ConsistentCopyVisibility
 internal data class CuePlaybackWindow private constructor(val startMs: Long, val endMs: Long) {
     val durationMs: Long get() = endMs - startMs

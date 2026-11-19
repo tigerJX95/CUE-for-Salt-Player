@@ -105,7 +105,7 @@ internal class NativeAlbumCue(
                 }
                 val knownSequence = albumSequence(tracks, matches)
                 list.applyByTrack(ids, hiddenIds, append = { id, hidden ->
-                    appendDisc(scope, byId.getValue(id), hidden, matches[id], revision, knownSequence)
+                    appendDisc(scope, byId.getValue(id), hidden, matches[id], revision, knownSequence, tracks)
                     if (id == ids.last()) appendAlbumActions(scope, ids)
                 }, appendFallback = {
                     appendMultiDisc(scope, tracks, revision)
@@ -193,10 +193,10 @@ internal class NativeAlbumCue(
 
     private fun appendDisc(
         scope: Any, track: AlbumHookTarget.Track, hidden: Boolean, resolvedCue: AlbumCue?,
-        revision: Long, sequence: CueAlbumSequence?
+        revision: Long, sequence: CueAlbumSequence?, context: List<AlbumHookTarget.Track>
     ) {
         try {
-            val playAt = playbackFor(track, sequence)
+            val playAt = playbackFor(track, sequence, context)
             target.appendCue(scope, track.id) {
                 if (active()) {
                     AlbumCueRows(track.id, hidden, playAt, active, report, currentTrack, revision, multiDiscSeeking, resolvedCue)
@@ -214,7 +214,7 @@ internal class NativeAlbumCue(
         target.appendCue(scope, ids.joinToString(prefix = "multi-disc:", separator = ",") { "${it.length}:$it" }) {
             if (active()) {
                 MultiDiscCueRows(ids, revision, active, report, currentTrack) { id, matches ->
-                    byId[id]?.let { playbackFor(it, albumSequence(tracks, matches)) }
+                    byId[id]?.let { playbackFor(it, albumSequence(tracks, matches), tracks) }
                 }
             }
         }
@@ -228,7 +228,7 @@ internal class NativeAlbumCue(
             val audio = cue.tracks.firstOrNull()?.audio ?: return@map null
             if (cue.durationMs <= 0 || cue.tracks.any { it.audio != audio }) return@map null
             CueAlbumSequence.Disc(track.id, audio, cue) { position, switchSource ->
-                playback.playAt(track, position, switchSource)
+                playback.playAt(track, position, switchSource, tracks)
             }
         }
         return if (discs.zipWithNext().any { (left, right) -> left != null && right != null }) {
@@ -239,14 +239,15 @@ internal class NativeAlbumCue(
     }
 
     private fun playbackFor(
-        track: AlbumHookTarget.Track, sequence: CueAlbumSequence? = null
+        track: AlbumHookTarget.Track, sequence: CueAlbumSequence? = null,
+        context: List<AlbumHookTarget.Track> = listOf(track)
     ): ((Long, Boolean) -> Unit)? = target.playback?.let { playback ->
         { position, switchSource ->
             if (sequence != null && sequence.hasDisc(track.id)) {
                 sequence.select(track.id, position, switchSource)
             } else {
                 CueAlbumSequence.clear()
-                playback.playAt(track, position, switchSource)
+                playback.playAt(track, position, switchSource, context)
             }
         }
     }

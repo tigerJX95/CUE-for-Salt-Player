@@ -13,10 +13,22 @@ import javax.imageio.stream.MemoryCacheImageInputStream
 
 internal object FolderCover {
     private val names = listOf("cover.png", "cover.jpg", "folder.png", "folder.jpg")
+    private val discDirectory = Regex("(?:cd|disc|disk|光盘|碟片)[\\s._-]*[0-9]{1,3}", RegexOption.IGNORE_CASE)
 
     fun load(audio: Path, maxSize: Int = 512): BufferedImage? {
         val directory = audio.parent ?: return null
         return loadDirectory(directory, maxSize)
+    }
+
+    // A catalog thumbnail exposes only its representative audio, not the album's track list.
+    // Only explicit disc folder names permit the one-level album-directory fallback.
+    // Callers must first verify that the representative audio has a matching CUE.
+    fun loadCatalog(audio: Path, maxSize: Int = 512): BufferedImage? {
+        val directory = audio.parent ?: return null
+        val album = directory.parent?.takeIf {
+            it.parent != null && discDirectory.matches(directory.fileName?.toString().orEmpty())
+        }
+        return album?.let { loadDirectory(it, maxSize) } ?: loadDirectory(directory, maxSize)
     }
 
     fun loadMultiDisc(audioFiles: List<Path>, maxSize: Int = 512): BufferedImage? {

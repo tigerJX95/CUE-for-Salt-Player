@@ -52,6 +52,32 @@ class FolderCoverTest {
         assertNull(FolderCover.loadMultiDisc(listOf(first, other).map { it.resolve("disc.wav").toPath() }))
     }
 
+    @Test fun catalogThumbnailUsesSharedCoverForExplicitDiscFolders() {
+        val album = temp.newFolder("双碟专辑")
+        writeImage(album.resolve("folder.png"), "png", Color.RED)
+        for (name in listOf("CD1", "cd02", "Disc 2", "光盘 1")) {
+            val disc = album.resolve(name).apply { mkdir() }
+            writeImage(disc.resolve("cover.png"), "png", Color.BLUE)
+            assertEquals(Color.RED.rgb, FolderCover.loadCatalog(disc.resolve("disc.wav").toPath())?.getRGB(0, 0))
+        }
+    }
+
+    @Test fun catalogThumbnailFallsBackToDiscCoverWhenSharedCoverIsCorrupt() {
+        val album = temp.newFolder("Album")
+        val disc = album.resolve("CD2").apply { mkdir() }
+        album.resolve("cover.png").writeText("invalid png")
+        writeImage(disc.resolve("folder.png"), "png", Color.GREEN)
+        assertEquals(Color.GREEN.rgb, FolderCover.loadCatalog(disc.resolve("disc.wav").toPath())?.getRGB(0, 0))
+    }
+
+    @Test fun catalogThumbnailDoesNotSearchParentOfOrdinaryAudioFolder() {
+        val album = temp.newFolder("Album")
+        writeImage(temp.root.resolve("cover.png"), "png", Color.RED)
+        assertNull(FolderCover.loadCatalog(album.resolve("disc.wav").toPath()))
+        writeImage(album.resolve("folder.png"), "png", Color.BLUE)
+        assertEquals(Color.BLUE.rgb, FolderCover.loadCatalog(album.resolve("disc.wav").toPath())?.getRGB(0, 0))
+    }
+
     @Test fun downsamplesLargeCoversBeforeDisplayingThem() {
         val cover = temp.newFile("cover.png")
         ImageIO.write(BufferedImage(2048, 1024, BufferedImage.TYPE_INT_RGB), "png", cover)

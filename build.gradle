@@ -5,7 +5,7 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.compose' version '2.4.20'
 }
 
-version = '0.5.0'
+version = '0.6.0'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -62,4 +62,30 @@ tasks.register('plugin', Zip) {
     into('classes') {
         from { zipTree(mainJar.get().archiveFile.get().asFile) }
     }
+}
+
+// Test packages must pass the complete unit suite too.
+tasks.named('plugin') { dependsOn tasks.named('test') }
+
+tasks.register('hostRegressionGate', Exec) {
+    group = 'verification'
+    description = 'Verify native bindings and real-host CUE row projection before release'
+    dependsOn tasks.named('jar'), tasks.named('test')
+    doFirst {
+        def archive = providers.gradleProperty('spwHostArchive').orElse(providers.environmentVariable('SPW_HOST_ARCHIVE')).orNull
+        if (!archive || !file(archive).isFile()) {
+            throw new GradleException('Release requires the local Salt Player host archive: -PspwHostArchive=/path/to/ffmpeg-x64.dll (or SPW_HOST_ARCHIVE)')
+        }
+        commandLine new File(System.getProperty('java.home'), 'bin/java').absolutePath,
+            '-Djava.awt.headless=true', file('scripts/HostRegressionGate.java').absolutePath,
+            tasks.named('jar').get().archiveFile.get().asFile.absolutePath, file(archive).absolutePath
+    }
+}
+
+tasks.named('plugin') { mustRunAfter tasks.named('hostRegressionGate') }
+
+tasks.register('releasePlugin') {
+    group = 'build'
+    description = 'Build a release package only after unit and real-host regression gates pass'
+    dependsOn tasks.named('hostRegressionGate'), tasks.named('plugin')
 }

@@ -11,7 +11,7 @@ class PlaybackProbe : PlaybackExtensionPoint {
     }
 
     override fun onStateChanged(state: PlaybackExtensionPoint.State) {
-        if (state == PlaybackExtensionPoint.State.Ended) {
+        if (state == PlaybackExtensionPoint.State.Ended && !runCatching { queuePlaybackOwnsEnd?.invoke() == true }.getOrDefault(false)) {
             runCatching { CueAlbumSequence.ended(lastPosition) }
         }
         if (state == PlaybackExtensionPoint.State.Ready || state == PlaybackExtensionPoint.State.Idle) {
@@ -20,6 +20,7 @@ class PlaybackProbe : PlaybackExtensionPoint {
     }
 
     override fun onIsPlayingChanged(isPlaying: Boolean) {
+        playing = isPlaying
         if (isPlaying) mediaChanged?.invoke()
     }
 
@@ -32,6 +33,8 @@ class PlaybackProbe : PlaybackExtensionPoint {
     }
 
     companion object {
+        @Volatile internal var queuePlaybackOwnsEnd: (() -> Boolean)? = null
+        @Volatile internal var playing: Boolean? = null
         @Volatile internal var mediaChanged: (() -> Unit)? = null
         @Volatile internal var lastSeek: Sample? = null
             private set

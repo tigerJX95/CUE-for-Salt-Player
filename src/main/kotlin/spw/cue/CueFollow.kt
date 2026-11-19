@@ -8,7 +8,7 @@ import javax.swing.SwingUtilities
 import javax.swing.SwingWorker
 import javax.swing.Timer
 
-internal data class FollowedCue(val file: Path, val result: ProbeResult)
+internal data class FollowedCue(val file: Path?, val result: ProbeResult)
 
 internal class CueFollow(
     private val active: () -> Boolean = { true }, private val changed: (FollowedCue?) -> Unit
@@ -35,7 +35,7 @@ internal class CueFollow(
                 val current = LibraryProbe.current()
                 val key = keyOf(current)
                 if (key == last) return Update.Unchanged
-                val cue = key?.let { find(it.path, current) }
+                val cue = if (current != null && key != null) find(key.path, current) else null
                 return if (key == keyOf(LibraryProbe.current())) Update.Changed(key, cue) else Update.Retry
             }
 
@@ -63,15 +63,12 @@ internal class CueFollow(
         }.also { it.execute() }
     }
 
-    private fun find(audio: Path, current: MediaItem?): FollowedCue? {
-        val located = try {
-            CueDiscovery.find(audio)
-        } catch (_: IOException) {
-            null
-        } catch (_: IllegalStateException) {
-            null
-        } ?: return null
-        return FollowedCue(located.path, LibraryProbe.inspect(located.sheet, current))
+    private fun find(audio: Path, current: MediaItem): FollowedCue? = try {
+        LibraryProbe.inspectPlayingAlbum(current, audio, active)
+    } catch (_: IOException) {
+        null
+    } catch (_: IllegalStateException) {
+        null
     }
 
     override fun close() {

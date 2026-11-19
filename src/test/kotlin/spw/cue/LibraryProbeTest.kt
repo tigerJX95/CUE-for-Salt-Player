@@ -229,6 +229,53 @@ class LibraryProbeTest {
         assertEquals(listOf("2", "absent", "1", "bonus"), fake.queriedIds)
     }
 
+    @Test fun currentAlbumRecoveryIncludesBothDiscsAndKeepsManualOpenLocalToItsCue() {
+        fun disc(folder: String, title: String, id: String): MediaItem {
+            val root = temp.newFolder(folder).toPath()
+            root.resolve("image.cue").toFile().writeText("""
+                FILE image.wav WAVE
+                TRACK 01 AUDIO
+                TITLE "$title First"
+                INDEX 01 00:00:00
+                TRACK 02 AUDIO
+                TITLE "$title Second"
+                INDEX 01 00:10:00
+            """.trimIndent())
+            return item(root.resolve("image.wav"), id).copy(album = "Collection", albumArtist = "The Band")
+        }
+
+        val first = disc("CD1", "CD1", "001").copy(artist = "Guest 1")
+        val second = disc("CD2", "CD2", "257").copy(artist = "Guest 2")
+        val unrelated = disc("Different", "Unrelated", "258").copy(albumArtist = "Another Band")
+        val filler = (2..256).map { item(temp.root.toPath().resolve("other.wav"), "%03d".format(it)) }
+        val fake = Host(first, filler + listOf(first, second, unrelated))
+        WorkshopApi.instance = fake
+        val audio = Path.of(first.path)
+        val found = requireNotNull(LibraryProbe.inspectPlayingAlbum(first, audio) { true })
+
+        assertEquals(null, found.file)
+        assertEquals(listOf(null, "256"), fake.cursors)
+        val (sheet, matches, current) = found.result
+        assertEquals(listOf("CD1 First", "CD1 Second", "CD2 First", "CD2 Second"), sheet.tracks.map { it.title })
+        assertEquals(setOf(first, second), matches.values.toSet())
+        assertEquals(first, current)
+        assertEquals(listOf(true, true, false, false), sheet.tracks.map { LibraryProbe.canSeek(it, current) })
+
+        val keys = sheet.tracks.map(SongVisibility::key)
+        val store = SongVisibility(temp.root.toPath().resolve("visibility.txt"))
+        store.hide(setOf(keys[0], keys[2]))
+        store.remove(setOf(keys[1], keys[3]))
+        val hidden = filterManagedCueTracks(sheet.tracks, keys, "", CueTrackStatusFilter.Hidden, store.recovery.value)
+        val removed = filterManagedCueTracks(sheet.tracks, keys, "", CueTrackStatusFilter.Removed, store.recovery.value)
+        assertEquals(listOf(0, 2), hidden.map { it.index })
+        assertEquals(listOf(1, 3), removed.map { it.index })
+        store.restore(setOf(keys[2], keys[3]))
+        assertEquals(SongVisibilityRecords(setOf(keys[0]), setOf(keys[1])), store.recovery.value)
+
+        val manuallyOpened = LibraryProbe.inspect(audio.resolveSibling("image.cue"))
+        assertEquals(listOf("CD1 First", "CD1 Second"), manuallyOpened.sheet.tracks.map { it.title })
+    }
+
     @Test fun mapsMultiFileCueTracksToTheirOwnSourceAndPlaybackOffset() {
         val cue = temp.newFile("set.cue")
         cue.writeText("""

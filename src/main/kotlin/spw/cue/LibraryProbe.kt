@@ -49,6 +49,36 @@ internal object LibraryProbe {
 
     fun current(): MediaItem? = WorkshopApi.playback.getCurrentMediaItem()
 
+    fun inspectPlayingAlbum(current: MediaItem, audio: Path, active: () -> Boolean): FollowedCue? {
+        val located = CueDiscovery.find(audio) ?: return null
+        val album = current.album.trim()
+        val artist = current.albumArtist.trim().ifBlank { current.artist.trim() }
+        if (album.isEmpty() || artist.isEmpty()) {
+            return FollowedCue(located.path, inspect(located.sheet, current))
+        }
+
+        val explicit = located.sheet.tracks.mapTo(mutableSetOf()) { it.audio }
+        val sources = linkedMapOf(audio to current)
+        for (item in libraryTracks(active)) {
+            val path = pathOf(item) ?: continue
+            val sameAlbum = item.album.trim().equals(album, ignoreCase = true) &&
+                item.albumArtist.trim().ifBlank { item.artist.trim() }.equals(artist, ignoreCase = true) &&
+                (current.year <= 0 || item.year <= 0 || current.year == item.year)
+            if (sameAlbum || path in explicit) sources.putIfAbsent(path, item)
+        }
+
+        val siblings = CueDiscovery.findAll(sources.keys - explicit, active = active)
+        val additional = siblings.keys.sorted().flatMap { path ->
+            siblings.getValue(path).sheet.tracks.filter { it.audio == path }
+        }
+        if (additional.isEmpty()) {
+            return FollowedCue(located.path, ProbeResult(located.sheet, sources.filterKeys { it in explicit }, current))
+        }
+        val tracks = (located.sheet.tracks + additional).groupBy { it.audio }.toSortedMap().values.flatten()
+        val sheet = CueSheet("专辑 CUE", album, tracks)
+        return FollowedCue(null, ProbeResult(sheet, sources.filterKeys { it in explicit || it in siblings }, current))
+    }
+
     fun findAlbumCue(trackId: String): AlbumCue {
         val item = WorkshopApi.library.getTrackById(trackId)
             .toCompletableFuture().get(10, TimeUnit.SECONDS)
@@ -101,23 +131,29 @@ internal object LibraryProbe {
         if (currentPath != null && current != null && current.id.isNotBlank() && pending.remove(currentPath)) {
             matches[currentPath] = current
         }
+        if (pending.isNotEmpty()) for (item in libraryTracks { true }) {
+            val path = pathOf(item) ?: continue
+            if (pending.remove(path)) matches[path] = item
+            if (pending.isEmpty()) break
+        }
+        return ProbeResult(sheet, matches, current)
+    }
+
+    private fun libraryTracks(active: () -> Boolean): Sequence<MediaItem> = sequence {
         var afterId: String? = null
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
-        while (pending.isNotEmpty()) {
+        while (true) {
+            if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
             val remaining = deadline - System.nanoTime()
             check(remaining > 0) { "读取原生曲库超时" }
             val page = WorkshopApi.library.getTracks(afterId, 256)
                 .toCompletableFuture().get(remaining, TimeUnit.NANOSECONDS)
-            for (item in page) {
-                val path = pathOf(item) ?: continue
-                if (pending.remove(path)) matches[path] = item
-            }
+            yieldAll(page)
             if (page.size < 256) break
             val nextId = page.last().id
             check(nextId.isNotBlank() && nextId != afterId) { "原生曲库分页游标异常" }
             afterId = nextId
         }
-        return ProbeResult(sheet, matches, current)
     }
 
     fun pathOf(item: MediaItem?): Path? = localPath(item?.path)

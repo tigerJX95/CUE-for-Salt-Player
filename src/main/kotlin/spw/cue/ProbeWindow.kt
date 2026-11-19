@@ -1,5 +1,6 @@
 package spw.cue
 
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -30,8 +31,10 @@ internal class ProbeWindow(
     private val visibility: () -> StateFlow<SongVisibilityRecords>?,
     private val restoreHiddenSongs: (Set<String>?) -> Unit,
     private val refreshAlbum: (List<String>) -> Unit,
+    private val currentTrack: @Composable () -> CueTrack?,
     private val canReadLibrary: () -> Boolean,
-    private val active: () -> Boolean
+    private val active: () -> Boolean,
+    private val refreshVisibility: () -> Unit = {}
 ) : JFrame("CUE 分轨 · CUE for Salt Player") {
     private var report by mutableStateOf("")
     private var apiReport by mutableStateOf<String?>(null)
@@ -49,9 +52,9 @@ internal class ProbeWindow(
 
     init {
         defaultCloseOperation = WindowConstants.DISPOSE_ON_CLOSE
-        minimumSize = Dimension(650, 390)
+        minimumSize = Dimension(650, 560)
         val panel = ComposePanel().apply {
-            preferredSize = Dimension(760, 540)
+            preferredSize = Dimension(800, 700)
             setContent {
                 LaunchedEffect(showingDiagnostics && apiReport != null) {
                     while (showingDiagnostics && apiReport != null && active()) {
@@ -59,14 +62,19 @@ internal class ProbeWindow(
                         delay(350)
                     }
                 }
+                val playing = currentTrack()
                 ProbeWindowContent(
+                    playingTrack = playing,
                     version = version,
-                    source = cuePath?.fileName?.toString()?.takeIf { result != null },
+                    source = result?.let { data ->
+                        cuePath?.fileName?.toString()
+                            ?: "当前专辑 · ${data.matches.size} 个音频文件"
+                    },
                     result = result,
                     selectedRow = selectedRow,
                     status = status,
                     busy = worker != null,
-                    canSeek = canSeekSelected(),
+                    canSeek = canSeekSelected(playing),
                     diagnostics = showingDiagnostics,
                     report = apiReport ?: listOf(report, seekReport).filter(String::isNotBlank).joinToString("\n\n"),
                     showingApi = apiReport != null,
@@ -76,7 +84,7 @@ internal class ProbeWindow(
                     onSelect = { selectedRow = it },
                     onPlay = { index ->
                         selectedRow = index
-                        seekSelected()
+                        seekSelected(playing)
                     },
                     onToggleDiagnostics = {
                         showingDiagnostics = !showingDiagnostics
@@ -104,7 +112,7 @@ internal class ProbeWindow(
                     },
                     visibility = visibility()?.collectAsState()?.value ?: SongVisibilityRecords(),
                     onRestoreHiddenSongs = restoreHiddenSongs,
-                    onSeek = ::seekSelected
+                    onSeek = { seekSelected(playing) }
                 )
             }
         }
@@ -170,27 +178,33 @@ internal class ProbeWindow(
             status = "查找当前音频需要曲库读取权限，可手动打开 CUE 预览。"
             return
         }
-        clearResult("正在查找当前音频的外置或内嵌 CUE…")
+        clearResult("正在查找当前专辑的外置或内嵌 CUE…")
         runTask({
             val current = LibraryProbe.current()
             val audio = LibraryProbe.pathOf(current)
-            val located = audio?.let(CueDiscovery::find)
-            val inspected = located?.let { LibraryProbe.inspect(it.sheet, current) }
-            Triple(audio, located?.path, inspected)
-        }) { (audio, file, inspected) ->
+            audio to if (audio != null && current != null) LibraryProbe.inspectPlayingAlbum(current, audio, active) else null
+        }) { (audio, cue) ->
             when {
                 audio == null -> status = "请先在椒盐播放本地整轨，或手动打开 CUE。"
-                file == null || inspected == null -> {
+                cue == null -> {
                     report = "当前播放  $audio"
                     status = "未找到匹配的外置或内嵌 CUE，可手动打开外置 CUE 排查。"
                 }
-                else -> showResult(file, inspected, "已找到")
+                else -> showResult(cue.file, cue.result, "已找到")
             }
         }
     }
 
     private fun nativeReport(): String =
-        songReport() + "\n\n原生专辑页\n${albumStatus()}\n\n" + hostApiReport
+        songReport() + "\n\n${visibilityReport()}\n\n原生专辑页\n${albumStatus()}\n\n" + hostApiReport
+
+    private fun visibilityReport(): String {
+        val records = visibility()?.value ?: return "恢复记录：尚未加载"
+        val keys = result?.sheet?.tracks.orEmpty().mapTo(mutableSetOf(), SongVisibility::key)
+        return "恢复记录（当前列表多选／累加同步）\n" +
+            "已隐藏 ${records.hiddenInSongs.size} · 当前 CUE 匹配 ${keys.count { it in records.hiddenInSongs }}\n" +
+            "已移除 ${records.removedFromLibrary.size} · 当前 CUE 匹配 ${keys.count { it in records.removedFromLibrary }}"
+    }
 
     private fun chooseFile() {
         if (worker != null) return
@@ -283,20 +297,23 @@ internal class ProbeWindow(
         }
     }
 
-    private fun canSeekSelected(): Boolean {
+    private fun canSeekSelected(playing: CueTrack? = null): Boolean {
         val data = result ?: return false
         val track = data.sheet.tracks.getOrNull(selectedRow) ?: return false
-        return canReadLibrary() && worker == null && track.audio in data.matches && LibraryProbe.canSeek(track, data.current)
+        val source = data.matches[track.audio] ?: return false
+        val samePlayingFile = if (playing == null) LibraryProbe.canSeek(track, data.current)
+            else playing.audio == track.audio && track.startMs in 0 until source.duration
+        return canReadLibrary() && worker == null && samePlayingFile
     }
 
-    private fun seekSelected() {
-        if (!canSeekSelected()) return
+    private fun seekSelected(playing: CueTrack? = null) {
+        if (!canSeekSelected(playing)) return
         val inspected = checkNotNull(result)
         val track = inspected.sheet.tracks[selectedRow]
         seekTimer?.stop()
         seekReport = ""
         status = "正在重新确认当前播放项…"
-        runTask({ LibraryProbe.seek(track, inspected.current?.id, active) }) { requestedAt ->
+        runTask({ LibraryProbe.seek(track, LibraryProbe.current()?.id, active) }) { requestedAt ->
             status = "已请求定位到 ${track.title}"
             seekTimer = Timer(2_500) {
                 fun sample(value: PlaybackProbe.Sample?) =
@@ -309,7 +326,10 @@ internal class ProbeWindow(
 
     private fun <T> runTask(work: () -> T, completed: (T) -> Unit) {
         worker = object : SwingWorker<T, Void>() {
-            override fun doInBackground(): T = work()
+            override fun doInBackground(): T {
+                refreshVisibility()
+                return work()
+            }
             override fun done() {
                 if (worker !== this) return
                 worker = null

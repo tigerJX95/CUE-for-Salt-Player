@@ -17,6 +17,7 @@ import kotlin.coroutines.EmptyCoroutineContext
 internal class SongHookTarget private constructor(
     val filter: Method,
     val stateFlow: Method,
+    val nativeList: Method,
     val listBuilder: Method,
     val itemBatch: Method,
     val playback: NativeAlbumPlayback,
@@ -61,20 +62,6 @@ internal class SongHookTarget private constructor(
     fun tracksIn(value: Any): List<*> = groupTracks.get(value) as List<*>
 
     fun count(state: Any): Int = stateAccessors[2].invoke(state) as Int
-
-    @Suppress("UNCHECKED_CAST")
-    fun mutablePageState(source: StateFlow<*>): MutableStateFlow<Any>? {
-        if (source is MutableStateFlow<*>) return source as MutableStateFlow<Any>
-        // The verified host getter returns the read-only view created by stateIn.
-        // Keep the getter and the wrapper intact and use the existing StateFlow API to publish.
-        if (source.javaClass.name != "kotlinx.coroutines.flow.ReadonlyStateFlow") return null
-        val field = source.javaClass.declaredFields.singleOrNull {
-            !Modifier.isStatic(it.modifiers) && it.type == StateFlow::class.java
-        } ?: return null
-        if (!field.trySetAccessible()) return null
-        val delegate = field.get(source) as? MutableStateFlow<*> ?: return null
-        return delegate as MutableStateFlow<Any>
-    }
 
     fun projection(original: Any, groups: List<Any>, count: Int): Any {
         check(songState.declaringClass.isInstance(original) && count >= 0)
@@ -226,7 +213,7 @@ internal class SongHookTarget private constructor(
             }
             val accessors = HostCatalog.accessors(state)
             return SongHookTarget(
-                filter, stateFlow, builder, batch, checkNotNull(NativeAlbumPlayback.resolve()) { "无法定位歌曲点播入口" },
+                filter, stateFlow, nativeList, builder, batch, checkNotNull(NativeAlbumPlayback.resolve()) { "无法定位歌曲点播入口" },
                 NativeSongSelection.resolve(nativeList),
                 state, accessors,
                 group, groupKey, groupTracks, track.getMethod("getId"), track.getMethod("getTitle"),
@@ -235,4 +222,16 @@ internal class SongHookTarget private constructor(
             )
         }
     }
+}
+
+@Suppress("UNCHECKED_CAST")
+internal fun StateFlow<*>.mutableHostState(): MutableStateFlow<Any>? {
+    if (this is MutableStateFlow<*>) return this as MutableStateFlow<Any>
+    // Keep the host's stateIn wrapper intact so its collectors and sharing job remain attached.
+    if (javaClass.name != "kotlinx.coroutines.flow.ReadonlyStateFlow") return null
+    val field = javaClass.declaredFields.singleOrNull {
+        !Modifier.isStatic(it.modifiers) && it.type == StateFlow::class.java
+    } ?: return null
+    if (!field.trySetAccessible()) return null
+    return field.get(this) as? MutableStateFlow<Any>
 }

@@ -4,6 +4,7 @@ internal class SongPageDiagnostics {
     @Volatile var registration = "未启动 · 歌曲页接入默认关闭"
     @Volatile var playback = "尚未点播分轨"
     @Volatile var selfCheck = "尚未运行 · 点击「开始歌曲页诊断」"
+    @Volatile var artistPage = "尚未接入"
     private var filterEntries = 0L
     private var filterReturns = 0L
     private var listEntries = 0L
@@ -131,6 +132,7 @@ internal class SongPageDiagnostics {
         appendLine("歌曲页")
         appendLine("注册  $registration")
         appendLine("空列表自检  $selfCheck")
+        appendLine("艺术家歌曲页  $artistPage")
         appendLine("宿主回调  筛选进入 $filterEntries 次 · 返回 $filterReturns 次 · 共用列表入口 $listEntries 次")
         appendLine("原生筛选  $filter")
         appendLine("CUE 匹配  $scan")

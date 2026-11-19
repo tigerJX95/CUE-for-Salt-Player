@@ -43,6 +43,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     private var albumHook: AutoCloseable? = null
     private var albumCoverHook: AutoCloseable? = null
     private var gridCoverHook: AutoCloseable? = null
+    private var artistCoverHook: AutoCloseable? = null
     private var playbackCover: AutoCloseable? = null
     private var songCoverHook: AutoCloseable? = null
     private var songPageHook: AutoCloseable? = null
@@ -58,6 +59,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     @Volatile private var albumCoverStatus = "尚未注册"
     @Volatile private var albumStatisticsStatus = "尚未注册"
     @Volatile private var gridCoverStatus = "尚未注册"
+    @Volatile private var artistCoverStatus = "尚未注册"
     @Volatile private var albumPageStatus = "尚未收到专辑页回调"
     @Volatile private var songCoverStatus = "尚未注册"
     @Volatile private var playbackCoverStatus = "尚未注册"
@@ -98,6 +100,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         albumCoverStatus = "尚未注册"
         albumStatisticsStatus = "尚未注册"
         gridCoverStatus = "尚未注册"
+        artistCoverStatus = "尚未注册"
         songCoverStatus = "尚未注册"
         miniPlayerStatus = "尚未注册"
         playbackCoverStatus = "尚未注册"
@@ -176,7 +179,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
 
     private fun registerMiniPlayer(session: Session) {
         miniPlayerStatus = try {
-            miniPlayerCue = NativeMiniPlayerCue({ activeSession === session }) { status ->
+            miniPlayerCue = NativeMiniPlayerCue({ activeSession === session }, { songVisibility?.recovery?.value?.removedFromLibrary.orEmpty() }) { status ->
                 if (activeSession === session) miniPlayerStatus = status
             }
             miniPlayerStatus
@@ -374,6 +377,20 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                     null
                 }
             }
+            artistCoverStatus = "未识别到艺术家头像入口"
+            artistCoverHook = target.cover?.let { cover ->
+                try {
+                    cover.installArtists({ activeSession === session }) { status ->
+                        if (activeSession === session) artistCoverStatus = status
+                    }.also { artistCoverStatus = "已注册，等待艺术家头像绘制" }
+                } catch (error: Exception) {
+                    artistCoverStatus = "注册失败：${error.message ?: error.javaClass.simpleName}"
+                    null
+                } catch (error: LinkageError) {
+                    artistCoverStatus = "宿主接口不兼容：${error.javaClass.simpleName}"
+                    null
+                }
+            }
             songCoverStatus = "未识别到歌曲封面入口"
             songCoverHook = target.cover?.let { cover ->
                 try {
@@ -402,6 +419,8 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         albumCoverHook = null
         runCatching { gridCoverHook?.close() }
         gridCoverHook = null
+        runCatching { artistCoverHook?.close() }
+        artistCoverHook = null
         runCatching { songCoverHook?.close() }
         songCoverHook = null
     }
@@ -516,7 +535,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             "${pluginContext.spwVersion} / ${pluginContext.spwChannel} / ${System.getProperty("os.name")}",
             albumStatus = {
                 val taskbar = taskbarStatus?.let { "\n任务栏  $it" }.orEmpty()
-                "注册  $albumHookStatus\n页面  $albumPageStatus\n专辑统计  $albumStatisticsStatus\n封面  $albumCoverStatus\n专辑卡片  $gridCoverStatus\n歌曲封面  $songCoverStatus\n播放封面  $playbackCoverStatus\n播控条  $miniPlayerStatus$taskbar"
+                "注册  $albumHookStatus\n页面  $albumPageStatus\n专辑统计  $albumStatisticsStatus\n封面  $albumCoverStatus\n专辑卡片  $gridCoverStatus\n艺术家头像  $artistCoverStatus\n歌曲封面  $songCoverStatus\n播放封面  $playbackCoverStatus\n播控条  $miniPlayerStatus$taskbar"
             },
             retryAlbumHook = { registerAlbumHook(session, retry = true) },
             songReport = { songDiagnostics.report() },
@@ -525,7 +544,9 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
             visibility = { songVisibility?.recovery },
             restoreHiddenSongs = { restoreSongs(session, it) },
             refreshAlbum = { refreshAlbum(session, it) },
+            currentTrack = { miniPlayerCue?.currentTrack() },
             canReadLibrary = ::canReadLibrary,
+            refreshVisibility = { songVisibility?.refresh() },
             active = { activeSession === session }
         ).also {
             window = it

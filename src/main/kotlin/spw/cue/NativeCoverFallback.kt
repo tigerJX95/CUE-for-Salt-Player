@@ -31,12 +31,14 @@ import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier as JvmModifier
 import java.lang.reflect.ParameterizedType
+import java.io.IOException
 
 @OptIn(UnstableSpwWorkshopApi::class)
 internal class NativeCoverFallback private constructor(
     val render: Method,
     private val albumHeader: Header?,
     private val gridCaller: String?,
+    private val artistCaller: String?,
     private val songCaller: String?,
     private val platformPath: Method?
 ) {
@@ -44,6 +46,8 @@ internal class NativeCoverFallback private constructor(
 
     private val localSources = staticCompositionLocalOf<List<AlbumCueSource>> { emptyList() }
     private val localTrackIds = staticCompositionLocalOf<List<String>> { emptyList() }
+    private val localArtist = staticCompositionLocalOf<CatalogCoverQuery?> { null }
+    private val artistCovers = CatalogCueCover()
 
     fun install(
         active: () -> Boolean, trackIds: (List<*>) -> List<List<String>>, refresh: AlbumCueRefresh,
@@ -90,14 +94,69 @@ internal class NativeCoverFallback private constructor(
         }
     }
 
-    fun installGrid(active: () -> Boolean, report: (String) -> Unit): AutoCloseable =
-        installFileCover(checkNotNull(gridCaller) { "未找到专辑卡片封面调用" }, active, report)
+    fun installGrid(active: () -> Boolean, report: (String) -> Unit): AutoCloseable {
+        val album = HostCatalog.type("com.xuncorp.voxzen.data.entity.Album")
+        val title = album.getMethod("getTitle")
+        val artist = album.getMethod("getArtist")
+        return installCatalogContext(checkNotNull(gridCaller) { "未找到专辑卡片封面调用" },
+            "AlbumCover (AlbumCover.kt:", album, listOf(Boolean::class.javaPrimitiveType!!), active, report
+        ) { item -> CatalogCoverQuery(artist.invoke(item) as String, true, title.invoke(item) as String) }
+    }
+
+    fun installArtists(active: () -> Boolean, report: (String) -> Unit): AutoCloseable {
+        val artist = HostCatalog.type("com.xuncorp.voxzen.data.entity.Artist")
+        val name = artist.getMethod("getName")
+        val albumArtist = artist.getMethod("isAlbumArtist")
+        return installCatalogContext(checkNotNull(artistCaller) { "未找到艺术家头像封面调用" },
+            "ArtistCoverImage (ArtistCoverImage.kt:", artist, emptyList(), active, report
+        ) { item -> CatalogCoverQuery(name.invoke(item) as String, albumArtist.invoke(item) as Boolean) }
+    }
+
+    private fun installCatalogContext(
+        callerName: String, marker: String, entity: Class<*>, extraTypes: List<Class<*>>,
+        active: () -> Boolean, report: (String) -> Unit, queryFor: (Any) -> CatalogCoverQuery
+    ): AutoCloseable {
+        val caller = HostCatalog.type(callerName)
+        val entry = HostCatalog.tracedMethods(marker).single {
+            JvmModifier.isPublic(it.modifiers) && JvmModifier.isStatic(it.modifiers) &&
+                it.returnType == Void.TYPE && it.parameterTypes.toList() ==
+                    listOf(entity, Modifier::class.java) + extraTypes + listOf(
+                        Composer::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        }
+        check(entry.declaringClass == caller)
+        val callers = HostCatalog.callersOf(entry)
+        check(callers.isNotEmpty()) { "未找到艺术家头像上下文调用" }
+        val hooks = mutableListOf<AutoCloseable>()
+        try {
+            for (owner in callers) {
+                HostCatalog.requireSingleCall(owner, entry)
+                hooks += WorkshopApi.hookRegistrar.replaceComposable(
+                    caller.name, entry.name, owner.name, entry.composeParameters(), 50
+                ) { call ->
+                    val item = call.arguments.firstOrNull()
+                    val query = if (item != null && active()) runCatching {
+                        queryFor(item)
+                    }.getOrNull() else null
+                    CompositionLocalProvider(localArtist provides query) {
+                        val defaults = if (call.arguments.getOrNull(1) == null) 1 shl 1 else 0
+                        invoke(entry, call.arguments, currentComposer, defaults)
+                    }
+                }
+            }
+            hooks += installFileCover(caller.name, active, report, useArtistArtwork = true)
+        } catch (error: Throwable) {
+            hooks.asReversed().forEach { runCatching { it.close() } }
+            throw error
+        }
+        return AutoCloseable { hooks.asReversed().forEach { runCatching { it.close() } } }
+    }
 
     fun installSongs(active: () -> Boolean, report: (String) -> Unit): AutoCloseable =
         installFileCover(checkNotNull(songCaller) { "未找到歌曲封面调用" }, active, report, useSongArtwork = true)
 
     private fun installFileCover(
-        caller: String, active: () -> Boolean, report: (String) -> Unit, useSongArtwork: Boolean = false
+        caller: String, active: () -> Boolean, report: (String) -> Unit, useSongArtwork: Boolean = false,
+        useArtistArtwork: Boolean = false
     ): AutoCloseable {
         val getVri = render.parameterTypes[0].getMethod("getVri")
         val toPlatformPath = platformPath
@@ -108,6 +167,7 @@ internal class NativeCoverFallback private constructor(
         ) { call ->
             val model = call.arguments.firstOrNull()
             val songArtwork = if (useSongArtwork && active()) LocalCueSongArtwork.current else null
+            val artistQuery = if (useArtistArtwork && active()) localArtist.current else null
             val path = if (songArtwork == null && active() && model != null && toPlatformPath != null) runCatching {
                 LibraryProbe.localPath(toPlatformPath.invoke(null, getVri.invoke(model)) as? String)
             }.getOrNull() else null
@@ -117,6 +177,7 @@ internal class NativeCoverFallback private constructor(
                 when {
                     !active() -> null
                     songArtwork != null -> songArtwork.image()
+                    artistQuery != null -> key(artistQuery, path, model) { artistArtwork(artistQuery, path, active, report) }
                     path != null -> key(path, model) { gridArtwork(path, report) }
                     else -> {
                         SideEffect { report("原生无封面，宿主音频路径不可用") }
@@ -128,6 +189,36 @@ internal class NativeCoverFallback private constructor(
     }
 
     @Composable
+    private fun artistArtwork(
+        query: CatalogCoverQuery, path: Path?, active: () -> Boolean, report: (String) -> Unit
+    ): ImageBitmap? = produceState<ImageBitmap?>(null, query, path) {
+        try {
+            val image = runInterruptible(gridReads) {
+                val direct = try {
+                    path?.takeIf { CueDiscovery.find(it) != null }?.let { FolderCover.loadCatalog(it) }
+                } catch (_: IOException) {
+                    null
+                } catch (_: SecurityException) {
+                    null
+                } catch (_: IllegalStateException) {
+                    null
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+                (direct ?: artistCovers.load(query, path, active))?.toComposeImageBitmap()
+            }
+            if (active()) {
+                value = image
+                report(if (image == null) "艺术家关联的 CUE 未找到可读取封面" else "已读取艺术家关联的 CUE 专辑封面")
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (active()) report("读取艺术家封面失败：${error.javaClass.simpleName}")
+        }
+    }.value
+
+    @Composable
     private fun gridArtwork(path: Path, report: (String) -> Unit): ImageBitmap? =
         produceState<ImageBitmap?>(null, path) {
             report("原生无封面，正在查找同目录 CUE 和图片")
@@ -136,7 +227,7 @@ internal class NativeCoverFallback private constructor(
                     if (CueDiscovery.find(path) == null) {
                         null to "路径已解析，未找到匹配的同目录 CUE"
                     } else {
-                        val cover = FolderCover.load(path)?.toComposeImageBitmap()
+                        val cover = FolderCover.loadCatalog(path)?.toComposeImageBitmap()
                         cover to if (cover == null) "CUE 已匹配，未找到可读取的同目录封面" else "已读取同目录封面"
                     }
                 }
@@ -286,7 +377,7 @@ internal class NativeCoverFallback private constructor(
 
         fun resolve(
             decorator: Class<*>, groupType: ParameterizedType,
-            gridCovers: List<String>, songCovers: List<String>
+            gridCovers: List<String>, songCovers: List<String>, artistCovers: List<String>
         ): NativeCoverFallback? = try {
             val model = HostCatalog.type("com.xuncorp.voxzen.image.AudioCover")
             val owner = HostCatalog.type("com.xuncorp.voxzen.image.AudioCoverImageKt")
@@ -299,7 +390,7 @@ internal class NativeCoverFallback private constructor(
             }
             val path = resolvePlatformPath(model.getMethod("getVri").returnType)
             val header = runCatching { resolveHeader(decorator, render, groupType) }.getOrNull()
-            NativeCoverFallback(render, header, gridCovers.singleOrNull(), songCovers.singleOrNull(), path)
+            NativeCoverFallback(render, header, gridCovers.singleOrNull(), artistCovers.singleOrNull(), songCovers.singleOrNull(), path)
         } catch (_: Exception) {
             null
         } catch (_: LinkageError) {

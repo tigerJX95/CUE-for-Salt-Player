@@ -106,6 +106,26 @@ class CueAlbumSequenceTest {
         assertEquals(Triple("cd2", 7_000L, true), requests.last())
     }
 
+    @Test fun nativeQueueCompletionDoesNotAlsoAdvanceTheLegacyAlbumSequence() {
+        start()
+        val oldOwner = PlaybackProbe.queuePlaybackOwnsEnd
+        try {
+            PlaybackProbe.queuePlaybackOwnsEnd = { true }
+            EventQueue.invokeAndWait {
+                probe.onPositionUpdated(9_900)
+                probe.onStateChanged(State.Ended)
+            }
+            EventQueue.invokeAndWait {}
+            assertEquals(listOf("cd1"), requests.map { it.first })
+            PlaybackProbe.queuePlaybackOwnsEnd = { false }
+            EventQueue.invokeAndWait { probe.onStateChanged(State.Ended) }
+            EventQueue.invokeAndWait {}
+            assertEquals(listOf("cd1", "cd2"), requests.map { it.first })
+        } finally {
+            PlaybackProbe.queuePlaybackOwnsEnd = oldOwner
+        }
+    }
+
     private fun start() = CueAlbumSequence(listOf(first, second)) { active }.select(first.id, 0, false)
 
     private fun disc(id: String, start: Long, secondStart: Long): CueAlbumSequence.Disc {
