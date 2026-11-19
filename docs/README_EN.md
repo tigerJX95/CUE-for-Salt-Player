@@ -119,7 +119,7 @@ For example, put the audio and CUE sheet for disc 1 in `Album/CD1/` and those fo
 
 Artist Details, restoration across discs, and CUE track progress in the taskbar were verified with v0.6.0 on Salt Player 1.19.3 from the Windows Microsoft Store.
 
-| Platform | Distribution channel | Salt Player version | v0.2.0 verification |
+| Platform | Distribution channel | Salt Player version | v0.6.0 verification |
 | --- | --- | --- | --- |
 | Windows | Microsoft Store | 1.19.3 | Passed |
 | Windows | Steam | 1.19.3 | Passed |
