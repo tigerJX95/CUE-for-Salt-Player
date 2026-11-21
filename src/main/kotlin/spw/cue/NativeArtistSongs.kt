@@ -33,7 +33,8 @@ internal data class ArtistSongProjection(val groups: List<*>, val count: Int)
 internal class ArtistSongTarget(
     val stateGetter: Method,
     private val success: Constructor<*>,
-    private val accessors: List<Method>
+    private val accessors: List<Method>,
+    val search: ArtistSongSearchBinding? = null
 ) {
     fun groups(state: Any?): List<*>? =
         if (success.declaringClass.isInstance(state)) accessors[1].invoke(state) as List<*> else null
@@ -80,7 +81,8 @@ internal class ArtistSongTarget(
                     it.type().stringValue() == "()Ljava/util/List;"
             }.map(HostCatalog::resolve).distinct().single()
             check(accessors[1] == groups) { "艺术家歌曲分组字段不匹配" }
-            return ArtistSongTarget(getter, success, accessors)
+            val search = runCatching { ArtistSongSearchBinding.resolve(getter.declaringClass, state) }.getOrNull()
+            return ArtistSongTarget(getter, success, accessors, search)
         }
     }
 }
@@ -93,17 +95,21 @@ internal class NativeArtistSongs(
     hideWhole: () -> Boolean,
     excluded: Flow<Set<String>>,
     revision: Flow<Long>,
-    private val project: (List<*>, Boolean, Set<String>) -> ArtistSongProjection?,
+    private val project: (List<*>, Boolean, Set<String>, ArtistSongSearch?) -> ArtistSongProjection?,
     private val report: (String) -> Unit
 ) : AutoCloseable {
     private data class Settings(val enabled: Boolean, val hideWhole: Boolean, val excluded: Set<String>, val revision: Long)
-    private data class Published(val original: Any, val projected: Any, val settings: Settings)
+    private data class Published(
+        val original: Any, val projected: Any, val settings: Settings, val search: ArtistSongSearch?
+    )
 
     private val settings = combine(enabled, snapshotFlow(hideWhole), excluded, revision, ::Settings)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Any()
     private var closed = false
     private var current: MutableStateFlow<Any>? = null
+    private var currentOwner: Any? = null
+    private val searchInput = MutableStateFlow<ArtistSongSearch?>(null)
     private var job: Job? = null
     private var published: Published? = null
 
@@ -112,8 +118,34 @@ internal class NativeArtistSongs(
         val hook = WorkshopApi.hookRegistrar.hookMethod(getter.declaringClass.name, getter.name, emptyList(), 50) {
             after { afterRead(it) }
         }
+        val searchHook = binding.search?.let { search ->
+            runCatching {
+                val producer = search.producer
+                WorkshopApi.hookRegistrar.hookMethod(
+                    producer.declaringClass.name, producer.name, listOf(Any::class.java.name), 50
+                ) {
+                    before { beforeSearch(it) }
+                }
+            }.getOrNull()
+        }
         return AutoCloseable {
-            try { close() } finally { hook.close() }
+            try { close() } finally {
+                try { searchHook?.close() } finally { hook.close() }
+            }
+        }
+    }
+
+    private fun beforeSearch(call: MethodHookParam) {
+        if (!active()) return
+        val producer = call.thisObject ?: return
+        synchronized(lock) {
+            val owner = currentOwner ?: return
+            if (closed || !active()) return
+            try {
+                binding.search?.read(producer, owner)?.let { searchInput.value = it }
+            } catch (error: Exception) {
+                report("艺术家搜索接入失败：${error.javaClass.simpleName}")
+            }
         }
     }
 
@@ -131,6 +163,8 @@ internal class NativeArtistSongs(
                 job?.cancel()
                 restore()
                 current = flow
+                currentOwner = call.thisObject
+                searchInput.value = null
                 job = scope.launch { observeWhileVisible(flow) }
             }
         } catch (error: Exception) {
@@ -145,8 +179,8 @@ internal class NativeArtistSongs(
             coroutineScope {
                 val subscribed = CompletableDeferred<Unit>()
                 val observer = launch {
-                    combine(flow.onSubscription { subscribed.complete(Unit) }, settings, ::Pair)
-                        .collectLatest { (state, options) -> publish(flow, state, options) }
+                    combine(flow.onSubscription { subscribed.complete(Unit) }, settings, searchInput, ::Triple)
+                        .collectLatest { (state, options, search) -> publish(flow, state, options, search) }
                 }
                 try {
                     subscribed.await()
@@ -159,26 +193,26 @@ internal class NativeArtistSongs(
         }
     }
 
-    private suspend fun publish(flow: MutableStateFlow<Any>, state: Any, options: Settings) {
+    private suspend fun publish(flow: MutableStateFlow<Any>, state: Any, options: Settings, search: ArtistSongSearch?) {
         val previous = synchronized(lock) {
             if (closed || !active() || current !== flow || flow.value !== state) return
             published?.takeIf { it.projected === state }
         }
-        if (previous?.settings == options) return
+        if (previous?.settings == options && previous.search == search) return
         val original = previous?.original ?: state
         try {
-            val groups = if (options.enabled) binding.groups(original)?.takeIf { it.isNotEmpty() } else null
+            val groups = if (options.enabled) binding.groups(original) else null
             val songs = groups?.let {
-                runInterruptible(reads) { project(it, options.hideWhole, options.excluded) }
+                runInterruptible(reads) { project(it, options.hideWhole, options.excluded, search) }
             }
             val projected = songs?.let { binding.project(original, it) } ?: original
             synchronized(lock) {
-                if (closed || !active() || current !== flow || flow.value !== state) return
+                if (closed || !active() || current !== flow || flow.value !== state || searchInput.value != search) return
                 if (!flow.compareAndSet(state, projected)) return
                 val actual = flow.value
                 published = if (songs != null && (actual === projected || actual === previous?.projected)) {
                     report("已展开当前艺术家的 CUE 分轨（${songs.count} 首）")
-                    Published(original, actual, options)
+                    Published(original, actual, options, search)
                 } else null
             }
         } catch (error: CancellationException) {
@@ -206,6 +240,8 @@ internal class NativeArtistSongs(
             scope.cancel()
             restore()
             current = null
+            currentOwner = null
+            searchInput.value = null
             job = null
         }
     }

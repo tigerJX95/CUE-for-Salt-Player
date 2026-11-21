@@ -184,6 +184,7 @@ internal object LibraryProbe {
             playAt(track.startMs, !sameFile)
         } else {
             check(sameFile) { "请先使用专辑播放按钮启动整轨，再点击分轨" }
+            CueSongOrder.clear()
             playback.seekTo(track.startMs)
         }
     }
@@ -197,6 +198,30 @@ internal object LibraryProbe {
         check(active() && !Thread.currentThread().isInterrupted) { "验证已取消" }
         val requestedAt = System.nanoTime()
         playback.seekTo(track.startMs)
+        return requestedAt
+    }
+
+    fun playFromWindow(
+        track: CueTrack, inspected: ProbeResult, playback: NativeAlbumPlayback?, active: () -> Boolean
+    ): Long {
+        val current = current()
+        if (pathOf(current) == track.audio) return seek(track, current?.id, active).also { CueSongOrder.clear() }
+        val native = checkNotNull(playback) { "当前椒盐版本的跨文件点播不可用" }
+        val matched = checkNotNull(inspected.matches[track.audio]) { "曲库未找到对应整轨" }
+        val source = WorkshopApi.library.getTrackById(matched.id)
+            .toCompletableFuture().get(10, TimeUnit.SECONDS)
+        check(source != null && source.id == matched.id && pathOf(source) == track.audio &&
+            track.startMs in 0 until source.duration) {
+            "曲库中的整轨已改变，或分轨起点超出时长。请重新查找 CUE"
+        }
+        check(active() && !Thread.currentThread().isInterrupted) { "分轨播放已取消" }
+        val context = inspected.sheet.tracks.map { it.audio }.distinct().mapNotNull { audio ->
+            if (audio == track.audio) source else inspected.matches[audio]
+        }
+        val requestedAt = System.nanoTime()
+        CueAlbumSequence.clear()
+        CueSongOrder.clear()
+        native.playFromWindow(source, track.startMs, context)
         return requestedAt
     }
 

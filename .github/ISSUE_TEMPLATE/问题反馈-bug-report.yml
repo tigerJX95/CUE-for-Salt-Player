@@ -49,7 +49,7 @@ body:
         请填写 CUE for Salt Player 的版本，可在椒盐的模组管理中查看。
 
         Enter the CUE for Salt Player version shown in Salt Player’s mod manager.
-      placeholder: 例如 / e.g. v0.5.0
+      placeholder: 例如 / e.g. v0.7.0
     validations:
       required: true
 

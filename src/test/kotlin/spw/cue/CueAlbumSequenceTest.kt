@@ -7,7 +7,9 @@ import com.xuncorp.spw.workshop.api.WorkshopApi
 import com.xuncorp.spw.workshop.api.hook.HookRegistrar
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.Rule
@@ -124,6 +126,23 @@ class CueAlbumSequenceTest {
         } finally {
             PlaybackProbe.queuePlaybackOwnsEnd = oldOwner
         }
+    }
+
+    @Test fun nativeEndTakesTheNextAlbumDiscOnceAndUsesItsCueStart() {
+        val crossDiscRequests = mutableListOf<Triple<String, String, Long>>()
+        val sequence = CueAlbumSequence(listOf(first, second), { from, to, start ->
+            crossDiscRequests += Triple(from.id, to.id, start)
+        }) { active }
+        sequence.select(first.id, first.cue.tracks.last().startMs, false)
+        playback.item = playback.item?.copy(id = "dragged-cd1")
+        assertFalse(CueAlbumSequence.hasNativeSuccessor("Random"))
+        assertNull(CueAlbumSequence.advanceAtNativeEnd("RepeatOne"))
+        assertTrue(CueAlbumSequence.hasNativeSuccessor("CircleEnd"))
+        assertEquals(second.cue.tracks.first(), CueAlbumSequence.advanceAtNativeEnd("CircleEnd"))
+        assertNull(CueAlbumSequence.advanceAtNativeEnd("Circle"))
+        assertEquals(listOf(Triple("cd1", "cd2", 1_000L)), crossDiscRequests)
+        playback.item = playback.item?.copy(id = second.id, path = second.audio.toString())
+        assertNull(CueAlbumSequence.advanceAtNativeEnd("CircleEnd"))
     }
 
     private fun start() = CueAlbumSequence(listOf(first, second)) { active }.select(first.id, 0, false)

@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 internal class CueAlbumSequence(
     private val discs: List<Disc?>,
+    private val playAfter: ((from: Disc, to: Disc, position: Long) -> Unit)? = null,
     private val active: () -> Boolean
 ) {
     data class Disc(
@@ -18,7 +19,7 @@ internal class CueAlbumSequence(
     private class Position(val sequence: CueAlbumSequence, val index: Int) {
         val disc = checkNotNull(sequence.discs[index])
         val startedAt = System.nanoTime()
-        fun matches(id: String, audio: Path?) = disc.id == id && disc.audio == audio
+        fun matches(audio: Path?) = disc.audio == audio
     }
 
     fun hasDisc(id: String): Boolean = discs.any { it?.id == id }
@@ -57,6 +58,18 @@ internal class CueAlbumSequence(
             return move(selected, step)
         }
 
+        fun hasNativeSuccessor(mode: String?): Boolean =
+            nativeEndPosition(mode)?.let { destination(it, 1) != null } == true
+
+        fun advanceAtNativeEnd(mode: String?): CueTrack? =
+            nativeEndPosition(mode)?.let { move(it, 1, natural = true) }
+
+        private fun nativeEndPosition(mode: String?): Position? {
+            if (mode != "Circle" && mode != "CircleEnd") return null
+            val selected = current.get() ?: return null
+            return selected.takeIf(::isCurrent)
+        }
+
         fun ended(sample: PlaybackProbe.Sample?) {
             val selected = current.get() ?: return
             if (sample == null || sample.observedAt < selected.startedAt || !selected.sequence.active()) return
@@ -64,26 +77,31 @@ internal class CueAlbumSequence(
             if (sample.position <= 0L || sample.position < selected.disc.cue.durationMs - 2_000L) return
             EventQueue.invokeLater {
                 if (current.get() !== selected) return@invokeLater
-                runCatching { if (isCurrent(selected)) move(selected, 1) }
+                runCatching { if (isCurrent(selected)) move(selected, 1, natural = true) }
             }
         }
 
         private fun isCurrent(selected: Position): Boolean {
             if (!selected.sequence.active()) return false
             val item = LibraryProbe.current() ?: return false
-            return selected.matches(item.id, LibraryProbe.pathOf(item))
+            return selected.matches(LibraryProbe.pathOf(item))
         }
 
-        private fun move(from: Position, step: Int): CueTrack? {
-            val index = from.index + step
-            val disc = from.sequence.discs.getOrNull(index) ?: return null
+        private fun destination(from: Position, step: Int): CueTrack? {
+            val disc = from.sequence.discs.getOrNull(from.index + step) ?: return null
             val visible = CueRemoval.visibleAlbum(disc.cue).tracks
             val ordered = if (step > 0) visible else visible.asReversed()
-            val track = ordered.firstOrNull { CuePlaybackWindow.from(it, disc.cue.durationMs) != null } ?: return null
-            val target = Position(from.sequence, index)
+            return ordered.firstOrNull { CuePlaybackWindow.from(it, disc.cue.durationMs) != null }
+        }
+
+        private fun move(from: Position, step: Int, natural: Boolean = false): CueTrack? {
+            val track = destination(from, step) ?: return null
+            val target = Position(from.sequence, from.index + step)
             if (!current.compareAndSet(from, target)) return null
             try {
-                disc.play(track.startMs, true)
+                val playAfter = from.sequence.playAfter
+                if (natural && playAfter != null) playAfter(from.disc, target.disc, track.startMs)
+                else target.disc.play(track.startMs, true)
             } catch (error: Exception) {
                 current.compareAndSet(target, null)
                 throw error

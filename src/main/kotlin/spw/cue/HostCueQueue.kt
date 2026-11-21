@@ -62,12 +62,13 @@ internal class HostCueQueue {
 
     fun snapshot(): Snapshot? = flow.value?.let(::snapshot)
 
+    fun currentIndex(): Int? = flow.value?.let { fields[2].invoke(it) as Int }
+
     fun currentSourceIndex(snapshot: Snapshot, current: Any): Int? {
         val id = mediaFields[0].invoke(current) as String
         val audio = LibraryProbe.localPath(mediaFields.last().invoke(current) as? String)
         fun Source.matches(): Boolean = id == this.id || audio != null && audio == this.audio
-        val state = flow.value
-        val index = state?.let { fields[2].invoke(it) as Int }
+        val index = currentIndex()
         if (index != null && snapshot.sources.getOrNull(index)?.matches() == true) return index
         return snapshot.sources.firstOrNull { it.media === current || it.matches() }?.index
     }

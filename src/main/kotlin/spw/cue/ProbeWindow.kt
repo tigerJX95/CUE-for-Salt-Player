@@ -49,6 +49,7 @@ internal class ProbeWindow(
     private var cuePath by mutableStateOf<Path?>(null)
     private var albumIds by mutableStateOf<List<String>?>(null)
     private var firstOpen = true
+    private val crossFilePlayback = NativeAlbumPlayback.resolve()
 
     init {
         defaultCloseOperation = WindowConstants.DISPOSE_ON_CLOSE
@@ -74,7 +75,7 @@ internal class ProbeWindow(
                     selectedRow = selectedRow,
                     status = status,
                     busy = worker != null,
-                    canSeek = canSeekSelected(playing),
+                    playLabel = selectedPlaybackLabel(playing),
                     diagnostics = showingDiagnostics,
                     report = apiReport ?: listOf(report, seekReport).filter(String::isNotBlank).joinToString("\n\n"),
                     showingApi = apiReport != null,
@@ -291,29 +292,36 @@ internal class ProbeWindow(
         selectedRow = data.sheet.tracks.indexOfFirst { LibraryProbe.canSeek(it, data.current) }
         status = "$action ${data.sheet.tracks.size} 轨" + when {
             !canReadLibrary() -> " · 曲库匹配与定位需要曲库读取权限"
+            crossFilePlayback != null && data.matches.isNotEmpty() -> " · 双击可点播已匹配的分轨"
             data.current == null -> " · 当前无播放项"
             selectedRow < 0 -> if (albumIds != null) " · 可管理专辑分轨" else " · 当前播放项无可定位分轨"
             else -> " · 双击可定位到当前整轨中的分轨"
         }
     }
 
-    private fun canSeekSelected(playing: CueTrack? = null): Boolean {
-        val data = result ?: return false
-        val track = data.sheet.tracks.getOrNull(selectedRow) ?: return false
-        val source = data.matches[track.audio] ?: return false
+    private fun selectedPlaybackLabel(playing: CueTrack?): String? {
+        if (!canReadLibrary() || worker != null) return null
+        val data = result ?: return null
+        val track = data.sheet.tracks.getOrNull(selectedRow) ?: return null
+        val source = data.matches[track.audio] ?: return null
+        if (source.id.isBlank() || track.startMs !in 0 until source.duration) return null
         val samePlayingFile = if (playing == null) LibraryProbe.canSeek(track, data.current)
             else playing.audio == track.audio && track.startMs in 0 until source.duration
-        return canReadLibrary() && worker == null && samePlayingFile
+        return when {
+            samePlayingFile -> "跳到分轨起点"
+            crossFilePlayback != null -> "播放分轨"
+            else -> null
+        }
     }
 
-    private fun seekSelected(playing: CueTrack? = null) {
-        if (!canSeekSelected(playing)) return
+    private fun seekSelected(playing: CueTrack?) {
+        if (selectedPlaybackLabel(playing) == null) return
         val inspected = checkNotNull(result)
         val track = inspected.sheet.tracks[selectedRow]
         seekTimer?.stop()
         seekReport = ""
-        status = "正在重新确认当前播放项…"
-        runTask({ LibraryProbe.seek(track, LibraryProbe.current()?.id, active) }) { requestedAt ->
+        status = "正在确认分轨音频…"
+        runTask({ LibraryProbe.playFromWindow(track, inspected, crossFilePlayback, active) }) { requestedAt ->
             status = "已请求定位到 ${track.title}"
             seekTimer = Timer(2_500) {
                 fun sample(value: PlaybackProbe.Sample?) =

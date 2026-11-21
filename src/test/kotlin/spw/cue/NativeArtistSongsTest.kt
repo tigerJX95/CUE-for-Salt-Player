@@ -29,7 +29,7 @@ class NativeArtistSongsTest {
         val enabled = MutableStateFlow(true)
         val excluded = MutableStateFlow(emptySet<String>())
         val artist = NativeArtistSongs(binding, { true }, enabled, { true }, excluded, MutableStateFlow(0L),
-            { rows, hide, hidden ->
+            { rows, hide, hidden, _ ->
                 if ("Whole" !in rows) null
                 else {
                     val expanded = (if (hide) emptyList() else listOf("Whole")) +

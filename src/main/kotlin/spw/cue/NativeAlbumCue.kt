@@ -1,7 +1,10 @@
 package spw.cue
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,6 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
@@ -92,6 +97,10 @@ internal class NativeAlbumCue(
             if (!list.hasFooter || !active()) return
             call.setResult(result)
             val ids = tracks.map { it.id }
+            list.placeAlbumActions(target::isVisibleDiscHeading, { heading ->
+                if (active()) AlbumCueActions({ refreshAlbum(ids) }, { openAlbum(ids) }, heading)
+                else heading()
+            }, { appendAlbumActions(scope, ids) })
             val revision = refresh.revision(ids)
             val track = tracks.singleOrNull()
             if (track == null) {
@@ -106,10 +115,8 @@ internal class NativeAlbumCue(
                 val knownSequence = albumSequence(tracks, matches)
                 list.applyByTrack(ids, hiddenIds, append = { id, hidden ->
                     appendDisc(scope, byId.getValue(id), hidden, matches[id], revision, knownSequence, tracks)
-                    if (id == ids.last()) appendAlbumActions(scope, ids)
                 }, appendFallback = {
                     appendMultiDisc(scope, tracks, revision)
-                    appendAlbumActions(scope, ids)
                 }, cues = matches)
                 return
             }
@@ -120,9 +127,7 @@ internal class NativeAlbumCue(
             val hide = hideWholeTrack() && album != null && CueRemoval.visibleAlbum(album).tracks.isNotEmpty()
             val cues = if (album == null) emptyMap() else mapOf(track.id to album)
             list.apply(hide, cues) { hidden ->
-                val appended = append(scope, match, track, hidden, compact = true)
-                appendAlbumActions(scope, ids)
-                appended
+                append(scope, match, track, hidden, compact = true)
             }
         } catch (error: Exception) {
             report("构建专辑分轨区失败：${error.javaClass.simpleName}")
@@ -232,7 +237,10 @@ internal class NativeAlbumCue(
             }
         }
         return if (discs.zipWithNext().any { (left, right) -> left != null && right != null }) {
-            CueAlbumSequence(discs, active)
+            val byId = tracks.associateBy { it.id }
+            CueAlbumSequence(discs, { from, to, position ->
+                playback.playAt(byId.getValue(to.id), position, switchSource = true, context = tracks, afterDisc = from)
+            }, active)
         } else {
             null
         }
@@ -243,6 +251,7 @@ internal class NativeAlbumCue(
         context: List<AlbumHookTarget.Track> = listOf(track)
     ): ((Long, Boolean) -> Unit)? = target.playback?.let { playback ->
         { position, switchSource ->
+            CueSongOrder.clear()
             if (sequence != null && sequence.hasDisc(track.id)) {
                 sequence.select(track.id, position, switchSource)
             } else {
@@ -282,15 +291,51 @@ internal class NativeAlbumCue(
 }
 
 @Composable
-private fun AlbumCueActions(refresh: () -> Unit, open: () -> Unit) {
+private fun AlbumCueActions(
+    refresh: () -> Unit, open: () -> Unit, heading: (@Composable () -> Unit)? = null
+) {
+    val refreshInteraction = remember { MutableInteractionSource() }
+    val openInteraction = remember { MutableInteractionSource() }
+    val refreshHovered by refreshInteraction.collectIsHoveredAsState()
+    val openHovered by openInteraction.collectIsHoveredAsState()
+    val theme = nativeSongRowTheme()
+    val refreshHint = "重新识别本专辑的 CUE"
+    val openHint = "管理本专辑的分轨"
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        Modifier.fillMaxWidth().padding(end = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        NativeAlbumText("重新识别 CUE", Modifier.clickable(role = Role.Button, onClick = refresh).padding(vertical = 10.dp), singleLine = true)
-        NativeAlbumText("管理分轨", Modifier.clickable(role = Role.Button, onClick = open).padding(vertical = 10.dp), singleLine = true)
+        BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+            heading?.invoke()
+            val hint = when {
+                refreshHovered -> refreshHint
+                openHovered -> openHint
+                else -> null
+            }
+            // Keep the hint in this header so switching pages cannot leave a popup scene behind.
+            if (hint != null && (heading == null || maxWidth >= 300.dp)) {
+                NativeAlbumText(hint, Modifier.align(Alignment.CenterEnd), singleLine = true,
+                    style = theme.detailStyle, color = theme.detailColor)
+            }
+        }
+        AlbumCueAction("重新识别 CUE", refreshHint, refreshInteraction, refresh)
+        AlbumCueAction("管理分轨", openHint, openInteraction, open)
     }
+}
+
+@Composable
+private fun AlbumCueAction(
+    label: String, hint: String, interaction: MutableInteractionSource, onClick: () -> Unit
+) {
+    NativeAlbumText(
+        label,
+        Modifier.pointerHoverIcon(PointerIcon.Hand)
+            .clickable(interactionSource = interaction, indication = null, onClickLabel = hint,
+                role = Role.Button, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 8.dp),
+        singleLine = true
+    )
 }
 
 @Composable

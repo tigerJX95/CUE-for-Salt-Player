@@ -70,7 +70,7 @@ internal fun ProbeWindowContent(
     selectedRow: Int,
     status: String,
     busy: Boolean,
-    canSeek: Boolean,
+    playLabel: String?,
     diagnostics: Boolean,
     report: String,
     showingApi: Boolean,
@@ -312,7 +312,7 @@ internal fun ProbeWindowContent(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             ProbeText(status, colors.secondary, 13, Modifier.weight(1f).padding(end = 12.dp), lines = 2)
             if (!diagnostics) {
-                ProbeAction("跳到分轨起点", colors, enabled = canSeek && selectedVisible, primary = true, onClick = onSeek)
+                ProbeAction(playLabel ?: "播放分轨", colors, enabled = playLabel != null && selectedVisible, primary = true, onClick = onSeek)
             }
         }
     }

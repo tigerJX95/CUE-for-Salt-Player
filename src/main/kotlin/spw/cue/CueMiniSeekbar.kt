@@ -29,6 +29,7 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.progressBarRangeInfo
@@ -36,15 +37,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalComposeUiApi::class)
@@ -144,18 +139,19 @@ internal fun CueMiniSeekbar(
                     setProgress(action = onSeek)
                 }
         )
-        // The pointer position and the popup anchor must both be relative to this seekbar.
         (drag ?: hover)?.let { point ->
             val preview = (point.fraction * window.durationMs.toDouble()).toLong()
             val background = if (color.luminance() > .5f) Color(0xff292929) else Color(0xffeeeeee)
-            val gap = with(density) { 10.dp.roundToPx() }
-            val provider = remember(point.x, gap) { CueSeekTooltipPosition(point.x, gap) }
-            Popup(popupPositionProvider = provider, properties = PopupProperties(focusable = false)) {
-                BasicText(
-                    "${formatCueTime(preview)} / ${formatCueTime(window.durationMs)}",
+            // Keep the preview in the parent scene so removing it cannot dispose a pointer target scene.
+            Layout(modifier = Modifier.matchParentSize(), content = {
+                BasicText("${formatCueTime(preview)} / ${formatCueTime(window.durationMs)}",
                     Modifier.background(background, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 3.dp),
-                    style = TextStyle(color = color, fontSize = 12.sp)
-                )
+                    style = TextStyle(color = color, fontSize = 12.sp), maxLines = 1)
+            }) { measurables, bounds ->
+                val label = measurables.single().measure(Constraints(maxWidth = bounds.maxWidth))
+                val left = (point.x - label.width / 2).coerceIn(0, (bounds.maxWidth - label.width).coerceAtLeast(0))
+                val top = -label.height - 10.dp.roundToPx()
+                layout(bounds.maxWidth, bounds.maxHeight) { label.place(left, top) }
             }
         }
     }
@@ -170,15 +166,3 @@ private data class SeekPoint(val fraction: Float, val x: Int) {
     }
 }
 
-internal class CueSeekTooltipPosition(private val pointerX: Int, private val gap: Int) : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize
-    ): IntOffset {
-        val left = anchorBounds.left + pointerX - popupContentSize.width / 2
-        val top = anchorBounds.top - gap - popupContentSize.height
-        return IntOffset(
-            left.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0)),
-            top.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
-        )
-    }
-}

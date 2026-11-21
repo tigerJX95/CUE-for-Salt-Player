@@ -54,6 +54,28 @@ internal class SongHookTarget private constructor(
     fun artist(entity: Any): String? =
         (sourceArtist.invoke(entity) as? String).artistName() ?: (sourceAlbumArtist.invoke(entity) as? String).artistName()
 
+    fun matchesArtistSearch(entity: Any, query: String): Boolean =
+        query.isBlank() || (sourceTitle.invoke(entity) as String).contains(query, ignoreCase = true) ||
+            (sourceArtist.invoke(entity) as String).contains(query, ignoreCase = true) ||
+            (sourceAlbum.invoke(entity) as String).contains(query, ignoreCase = true)
+
+    fun orderedStartCallbacks(): List<Method> {
+        val callbacks = nativeList.declaringClass.declaredMethods.filter { method ->
+            val types = method.parameterTypes
+            val startsPlayback = types.contentEquals(arrayOf(List::class.java, HostCatalog.track, Boolean::class.javaPrimitiveType)) ||
+                types.size == 2 && types[0] == List::class.java && types[1].isEnum &&
+                types[1].enumConstants.map { (it as Enum<*>).name }.toSet() == setOf("Circle", "CircleEnd", "RepeatOne", "Random")
+            startsPlayback && method.returnType == Unit::class.java && Modifier.isStatic(method.modifiers) &&
+                HostCatalog.calls(method).any {
+                    it.owner().asInternalName() == "com/xuncorp/voxzen/service/PlaybackController" &&
+                        it.name().stringValue() == "setPlaybackQueue" &&
+                        it.type().stringValue() == "(Ljava/util/List;I)V"
+                }
+        }
+        check(callbacks.size == 2) { "无法定位歌曲页点播入口" }
+        return callbacks
+    }
+
     fun groupEntities(state: Any): List<*> {
         check(songState.declaringClass.isInstance(state)) { "歌曲筛选返回类型不匹配" }
         return stateAccessors.first().invoke(state) as List<*>
@@ -111,7 +133,9 @@ internal class SongHookTarget private constructor(
         check(listBuilder.invoke(null, *arguments) == Unit) { "空列表构建未正常返回" }
     }
 
-    fun replaceTracks(value: Any, tracks: List<Any>): Any = group.newInstance(groupKey.get(value), tracks)
+    fun groupOf(key: Any?, tracks: List<*>): Any = group.newInstance(key, tracks)
+
+    fun replaceTracks(value: Any, tracks: List<Any>): Any = groupOf(groupKey.get(value), tracks)
 
     fun trackForFilter(entity: Any, id: String, track: CueTrack, artist: String, duration: Long): Any {
         val args = Array<Any?>(sourceCopy.parameterCount) { index ->
@@ -213,7 +237,8 @@ internal class SongHookTarget private constructor(
             }
             val accessors = HostCatalog.accessors(state)
             return SongHookTarget(
-                filter, stateFlow, nativeList, builder, batch, checkNotNull(NativeAlbumPlayback.resolve()) { "无法定位歌曲点播入口" },
+                filter, stateFlow, nativeList, builder, batch,
+                checkNotNull(NativeAlbumPlayback.resolve()) { "无法定位歌曲点播入口" },
                 NativeSongSelection.resolve(nativeList),
                 state, accessors,
                 group, groupKey, groupTracks, track.getMethod("getId"), track.getMethod("getTitle"),

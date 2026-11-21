@@ -5,7 +5,8 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.compose' version '2.4.20'
 }
 
-version = '0.6.0'
+def releasedVersion = '0.7.0'
+version = providers.gradleProperty('previewVersion').getOrElse(releasedVersion)
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -66,6 +67,12 @@ tasks.register('plugin', Zip) {
 
 // Test packages must pass the complete unit suite too.
 tasks.named('plugin') { dependsOn tasks.named('test') }
+
+tasks.named('test') {
+    systemProperty 'cue.releasedVersion', releasedVersion
+    inputs.files('docs/README.md', 'docs/README_EN.md', 'docs/CHANGELOG.md', 'docs/CHANGELOG_EN.md',
+        '.github/ISSUE_TEMPLATE/问题反馈-bug-report.yml')
+}
 
 tasks.register('hostRegressionGate', Exec) {
     group = 'verification'

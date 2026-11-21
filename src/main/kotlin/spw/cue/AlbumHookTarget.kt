@@ -13,6 +13,7 @@ internal class AlbumHookTarget(
     private val entities: Field,
     private val trackId: Method,
     private val addItem: Method,
+    private val discNumber: Method?,
     val playback: NativeAlbumPlayback?,
     val cover: NativeCoverFallback?
 ) {
@@ -43,6 +44,12 @@ internal class AlbumHookTarget(
 
     fun appendCue(scope: Any, trackId: String, content: @Composable (Any) -> Unit) {
         addItem.invoke(null, scope, "spw.cue.support:$trackId", content)
+    }
+
+    fun isVisibleDiscHeading(key: Any?): Boolean {
+        val number = discNumber ?: return false
+        return number.declaringClass.isInstance(key) &&
+            runCatching { number.invoke(key) as Int != 0 }.getOrDefault(false)
     }
 
     companion object {
@@ -91,7 +98,15 @@ internal class AlbumHookTarget(
             }) { "无法确认列表追加入口" }
             val playback = NativeAlbumPlayback.resolve()
             val cover = NativeCoverFallback.resolve(decorator, groupType, gridCovers, songCovers, artistCovers)
-            return AlbumHookTarget(builder, decorator, entities, track.getMethod("getId"), item, playback, cover)
+            val discNumber = runCatching {
+                // Native disc keys carry the disc number, track count and total duration.
+                val keyType = groupType.actualTypeArguments.first() as Class<*>
+                val disc = keyType.permittedSubclasses.orEmpty().flatMap { it.constructors.asList() }.single {
+                    it.parameterTypes.toList() == listOf(int, int, Long::class.javaPrimitiveType)
+                }
+                HostCatalog.accessors(disc).first()
+            }.getOrNull()
+            return AlbumHookTarget(builder, decorator, entities, track.getMethod("getId"), item, discNumber, playback, cover)
         }
     }
 }

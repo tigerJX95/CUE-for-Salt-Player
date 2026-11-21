@@ -14,6 +14,7 @@ internal class SongPageDiagnostics {
     private var publish = "尚未挂载"
     private var list = "等待歌曲页列表回调"
     private var render = "尚未测得分轨行尺寸"
+    private var wholeArtwork = "等待 WAV 整轨行"
     private var error: String? = null
     @Volatile var canMount = false
         private set
@@ -123,6 +124,13 @@ internal class SongPageDiagnostics {
     }
 
     @Synchronized
+    fun wholeCover(status: String?, visible: Boolean) {
+        if (status != null && status != "没有匹配的外置 CUE") {
+            wholeArtwork = if (visible) "已绘制 · $status" else status
+        }
+    }
+
+    @Synchronized
     fun failed(stage: String, failure: Throwable) {
         error = "$stage · ${failure.cause?.message ?: failure.message ?: failure.javaClass.simpleName}"
     }
@@ -140,6 +148,7 @@ internal class SongPageDiagnostics {
         appendLine("计数挂载  $publish")
         appendLine("列表行  $list")
         appendLine("界面绘制  $render")
+        appendLine("WAV 整轨封面  $wholeArtwork")
         appendLine("分轨点播  $playback")
         error?.let { appendLine("最近错误  $it") }
     }.trimEnd()

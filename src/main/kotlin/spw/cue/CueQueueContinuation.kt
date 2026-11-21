@@ -5,6 +5,23 @@ import java.nio.file.Path
 internal data class CuePlaybackSource(val id: String, val audio: Path?, val media: Any)
 internal data class CuePlaybackScope(val sources: List<CuePlaybackSource>, val index: Int)
 
+/** Insert the next disc immediately after the finished item, retaining the other queued audio. */
+internal fun followAlbumDisc(
+    existing: List<CuePlaybackSource>, fromId: String, fromAudio: Path, target: CuePlaybackSource,
+    currentIndex: Int? = null
+): CuePlaybackScope? {
+    fun CuePlaybackSource.isFinishedDisc() = audio == fromAudio || audio == null && id == fromId
+    val finishedIndex = currentIndex?.takeIf { existing.getOrNull(it)?.isFinishedDisc() == true }
+        ?: existing.indexOfFirst { it.isFinishedDisc() }
+    if (finishedIndex < 0) return null
+    val queue = existing.toMutableList()
+    val nextDiscIndex = queue.indexOfFirst { it.id == target.id || target.audio != null && it.audio == target.audio }
+    val nextDisc = if (nextDiscIndex >= 0) queue.removeAt(nextDiscIndex) else target
+    val insertion = if (nextDiscIndex in 0 until finishedIndex) finishedIndex else finishedIndex + 1
+    queue.add(insertion, nextDisc)
+    return CuePlaybackScope(queue, insertion)
+}
+
 /** Prefer the established queue; repair an old one-file queue using the visible page's source scope. */
 internal fun cuePlaybackScope(
     existing: List<CuePlaybackSource>, context: List<CuePlaybackSource>, target: CuePlaybackSource

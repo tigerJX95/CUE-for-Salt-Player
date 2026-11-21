@@ -1,5 +1,6 @@
 package spw.cue
 
+import com.xuncorp.spw.workshop.api.PlaybackExtensionPoint.MediaItem
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
@@ -13,32 +14,61 @@ internal class NativeAlbumPlayback private constructor(
     private val play: Method
 ) {
     private val queue by lazy { runCatching { HostCueQueue() }.getOrNull() }
+    private val mediaConstructor by lazy { HostCatalog.media.getConstructor(*Array(6) { String::class.java }) }
 
     fun playAt(
         track: AlbumHookTarget.Track, position: Long, switchSource: Boolean,
-        context: List<AlbumHookTarget.Track> = emptyList()
+        context: List<AlbumHookTarget.Track> = emptyList(), afterDisc: CueAlbumSequence.Disc? = null,
+        replaceQueue: Boolean = false
     ) {
-        val controller = instance.get(null)
+        playAt(nativeSource(track), position, switchSource, afterDisc, replaceQueue) { context.map(::nativeSource) }
+    }
+
+    fun playbackMode(): String? = queue?.mode()
+
+    fun changeMode(mode: Enum<*>) {
+        instance.type.getMethod("changePlaybackMode", mode.declaringJavaClass).invoke(instance.get(null), mode)
+    }
+
+    fun playFromWindow(track: MediaItem, position: Long, context: List<MediaItem>) {
+        playAt(librarySource(track), position, switchSource = true) { context.map(::librarySource) }
+    }
+
+    private fun nativeSource(track: AlbumHookTarget.Track): CuePlaybackSource {
         val media = checkNotNull(converter.invoke(null, track.entity))
         val audio = LibraryProbe.localPath(HostCatalog.mediaLocation.invoke(media) as? String)
-        val target = CuePlaybackSource(track.id, audio, media)
+        return CuePlaybackSource(track.id, audio, media)
+    }
+
+    private fun librarySource(track: MediaItem): CuePlaybackSource {
+        val audio = checkNotNull(LibraryProbe.pathOf(track))
+        val media = mediaConstructor.newInstance(
+            track.id, track.title, track.artist, track.album, track.albumArtist, audio.toString()
+        )
+        return CuePlaybackSource(track.id, audio, media)
+    }
+
+    private fun playAt(
+        target: CuePlaybackSource, position: Long, switchSource: Boolean,
+        afterDisc: CueAlbumSequence.Disc? = null, replaceQueue: Boolean = false, context: () -> List<CuePlaybackSource>
+    ) {
+        val controller = instance.get(null)
         val currentQueue = runCatching { queue?.snapshot() }.getOrNull()
         val existing = currentQueue?.sources.orEmpty().map { CuePlaybackSource(it.id, it.audio, it.media) }
         val alreadyComplete = existing.size > 1 && existing.any {
-            it.id == track.id || audio != null && it.audio == audio
+            it.id == target.id || target.audio != null && it.audio == target.audio
         }
-        val pageSources = if (alreadyComplete) emptyList() else context.map { source ->
-            val item = checkNotNull(converter.invoke(null, source.entity))
-            CuePlaybackSource(source.id, LibraryProbe.localPath(HostCatalog.mediaLocation.invoke(item) as? String), item)
+        val selected = if (replaceQueue) cuePlaybackScope(emptyList(), context(), target) else afterDisc?.let {
+            followAlbumDisc(existing, it.id, it.audio, target, runCatching { queue?.currentIndex() }.getOrNull())
         }
-        val selected = cuePlaybackScope(existing, pageSources, target)
+            ?: cuePlaybackScope(existing, if (alreadyComplete) emptyList() else context(), target)
         val repairSingleFile = selected.sources.size > 1 && existing.size <= 1
-        if (switchSource || repairSingleFile) {
+        if (switchSource || repairSingleFile || replaceQueue) {
             if (selected.sources.size > 1) {
                 instance.type.getMethod("setPlaybackQueue", List::class.java, Int::class.javaPrimitiveType)
                     .invoke(controller, selected.sources.map { it.media }, selected.index)
             } else {
-                setQueue.invoke(controller, media)
+                setQueue.invoke(controller, selected.sources[selected.index].media)
             }
             prepare.invoke(controller)
         }

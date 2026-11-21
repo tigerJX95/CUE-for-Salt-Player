@@ -4,19 +4,17 @@
 
 A desktop Salt Player plugin for external CUE sheets and CUE data embedded in FLAC files. Browse, search, and play individual tracks in Album Details and Songs.
 
-**Current version v0.6.0 · 2026-11-19**
+**Current version v0.7.0 · 2026-11-20**
 
-- **Shuffle individual CUE tracks.** In the host’s Random mode, CUE sheets in the current queue are expanded into individual candidates alongside regular songs. Finishing a CUE track or pressing Next no longer forces playback into the next segment of the same audio file.
-- **Preserve the playback scope.** When switching to an audio file already in the current queue, keep the complete queue rather than replacing it with one full-length file. Shuffle does not add songs from outside that queue.
-- **Continue after the full-length file.** Sequential playback continues to the song after the current CUE source. Preserve complete queues and repair a former one-file queue from the current page; match by audio path when a dragged item has a different library ID.
-- **Consecutive skip state.** Sequential and random transitions release their waiting state when the target is reached, so completed switches do not keep blocking skips until timeout. Disabling clears pending transition state.
-- **Batch restoration and status filters.** Check multiple tracks or all displayed results and restore them together. Combine title and artist search with Hidden or Removed filters.
-- **Multi-disc management and playback location.** Group entries by source audio without renumbering groups after filtering. The playing track is marked; Locate playback clears the filters and scrolls to it.
-- **Artwork on artist pages.** Fill in missing album covers for single- and multi-disc albums that use external CUE sheets.
-- **Songs in Artist Details.** Open an artist from their avatar and select Songs to see CUE tracks from single- and multi-disc albums. The song count follows the list, and CUE tracks can be played, selected, hidden, or removed.
-- **Restoration across discs.** While a multi-disc album is playing, the CUE window combines hidden and removed records for its discs. Tracks across discs can be selected and restored together.
-- **Windows taskbar progress.** The progress bar uses the start and duration of the current CUE track and resets at the start of the next track.
-- **Digital Disc integration.** With SPW Digital Disc v1.11.0 enabled, switching CUE tracks triggers the disc eject animation.
+- **Follow the Songs list order.** Sequential playback and list loop follow the sort order and search results in use when playback starts. Automatic transitions and Previous/Next follow that order across regular songs, full-length audio, and individual CUE tracks.
+- **Continue across discs in Album Details.** Sequential playback and list loop follow the album’s disc and track order. The last CUE track on CD1 can continue into the first playable CUE track on CD2.
+- **Album-wide CUE actions.** Refresh CUE and Manage tracks appear to the right of the first visible disc heading and apply to the entire album.
+- **Play full-length audio from Songs.** Selecting the original row plays the entire audio file. Its title remains visible, and the accent color follows the actual CUE track during CUE playback.
+- **Artwork for full-length WAV files in Songs.** Fixes the default placeholder on full-length WAV rows with a matching external CUE sheet. Visible full-length rows can display folder artwork with or without individual CUE tracks shown.
+- **Locate playback and keep Songs steady.** Locate Current Song finds the playing CUE track or its full-length audio by row key and keeps the scroll position when the row is already fully visible. Songs retains the current results and loaded artwork during equivalent host refreshes to prevent flicker or jumping to the end of the list.
+- **Search Artist Details.** The Songs tab finds CUE tracks alongside regular songs and applies existing hidden and removed records.
+- **Play across files in the CUE window.** Select a track in another library-matched audio file from the same CUE sheet or multi-disc album.
+- **Hover stability.** The Songs locate hint and seek preview are rendered within the page to avoid pointer events going to a separate hover layer during navigation.
 
 [Version history](CHANGELOG_EN.md)
 
@@ -36,6 +34,7 @@ A CD rip can be stored as one audio file, with its track titles and start positi
 - **Playback controls.** The playback bar and Now Playing show the current track's title, artist, and track-relative progress. The Windows taskbar progress bar also follows the current CUE track. Sequential mode moves between adjacent CUE tracks and continues through the current queue after the source ends. Random mode selects individual CUE tracks and regular songs from that queue. Multi-disc albums can continue across disc boundaries.
 - **Artist credits and desktop titles.** Credits come from the track-level or album-level CUE `PERFORMER`, then the audio file or the library's album artist. Windows taskbar and Ubuntu Dock window titles follow the current track.
 - **Folder artwork.** When Salt Player has no artwork for the album, the plugin can use a cover image next to the audio file. For a multi-disc album, the header can also use artwork from the common parent folder of the disc folders.
+- **Digital Disc integration.** With SPW Digital Disc v1.11.0 enabled, switching CUE tracks triggers the disc eject animation.
 
 ## Installation and use
 
@@ -48,15 +47,17 @@ A CD rip can be stored as one audio file, with its track titles and start positi
 
 The accent color follows CUE track changes and disc transitions in Album Details and Songs. Pausing keeps the current track highlighted. When the current CUE track is visible, its full-length audio entry uses the normal text color.
 
-After editing a title, artist, track count, or timestamp, choose **Refresh CUE** in Album Details or Manage tracks. This forces a re-read even when an editor preserves the CUE file’s size and modification time. Existing entries from other albums are reused. An audio file’s original entry is restored if its CUE match is lost. The current playback file’s CUE data is also re-read to update its title, artist, and track time range.
+After editing a title, artist, track count, or timestamp, choose **Refresh CUE** beside the first disc heading in Album Details or in the Manage tracks window. This forces a re-read even when an editor preserves the CUE file’s size and modification time. Existing entries from other albums are reused. An audio file’s original entry is restored if its CUE match is lost. The current playback file’s CUE data is also re-read to update its title, artist, and track time range.
 
 ### Shuffle and playback scope
 
 Select Random using Salt Player’s playback-mode control. Each playable CUE track and each regular song in the current native queue becomes one candidate; the current track is excluded from the immediate next choice. Reaching a CUE boundary and pressing Next both choose a candidate. Previous can return to a previously played track when history is available. Tracks only hidden from Songs remain playable from albums; tracks removed through the plugin are excluded from its shuffle candidates.
 
-The candidate list is prepared in the background and reported under playback/queue diagnostics. If preparation or compatibility checks fail, native skipping remains available rather than forcing the adjacent CUE track. The native queue still displays audio files. Sequential and list-loop modes also preserve the complete queue. After the last CUE track, native playback continues to the next audio source; pressing Next at that boundary does the same. Sequential playback stops at the end of the entire queue, while list loop wraps to the queue’s first entry there. When the native queue owns completion, the plugin does not additionally advance the legacy album sequence. Repeat-one behavior remains unchanged.
+The candidate list is prepared in the background and reported under playback/queue diagnostics. Salt Player handles skipping while candidates are unavailable or the host integration is incompatible. The native queue still displays audio files.
 
-Selecting a CUE track in Songs or Album Details preserves an established complete queue. If an earlier version reduced it to one audio file, the current page’s source list can restore the scope and order without adding one audio entry per CUE segment. Select a track again from the desired list to repair an old one-file queue.
+When playback starts from the main Songs page, sequential playback and list loop use the displayed list order, including the active sort and search results. Regular songs, visible full-length entries, and individual CUE tracks each retain their position in the list. Selecting a full-length entry plays the entire file.
+
+When playback starts from Album Details, CUE tracks follow the album’s disc and track order. The last track on a disc can continue into the first playable track on the next disc. When there is no next CUE disc, playback continues according to Salt Player’s playback mode.
 
 ### Filter and restore tracks in the CUE window
 
@@ -66,7 +67,7 @@ Check individual boxes or choose Select results, then Restore checked tracks (N)
 
 Restore current results (N) restores hidden or removed tracks in this window’s current filtered results, leaving other CUE sources and filtered-out tracks unchanged. Restore album covers the full album regardless of filters; Restore all covers every album recorded by the plugin.
 
-Playback accent and checkboxes are independent. Locate playback clears filters and scrolls to the playing segment. Multi-audio results are grouped in source order, which may differ from disc-number tags. Double-clicking still seeks within the currently playing audio file; use Album Details or Songs to switch audio files. Jump to track start is disabled when its selected row is filtered out.
+Playback accent and checkboxes are independent. Locate playback clears filters and scrolls to the playing segment. Multi-audio results are grouped in source order, which may differ from disc-number tags. Double-click a library-matched track to play it. The button shows Jump to track start for a track in the current file and Play track for another matched file. Playback is disabled when the selected row is filtered out.
 
 ### Remove, hide, and restore CUE tracks
 
@@ -106,6 +107,8 @@ If Salt Player has no native cover, the plugin checks these filenames in order a
 | 3 | `folder.png` |
 | 4 | `folder.jpg` |
 
+For full-length WAV entries in Songs, the plugin checks the audio folder for artwork first. If there is no usable cover and the file is in a disc folder such as `CD1` or `CD2`, it looks in the parent folder for shared artwork.
+
 For example, put the audio and CUE sheet for disc 1 in `Album/CD1/` and those for disc 2 in `Album/CD2/`. Salt Player must group both discs under the same album. A single CUE sheet with multiple `FILE` entries for audio files in the same folder also works.
 
 ## Settings
@@ -117,18 +120,17 @@ For example, put the audio and CUE sheet for disc 1 in `Album/CD1/` and those fo
 
 ## Compatibility
 
-Artist Details, restoration across discs, and CUE track progress in the taskbar were verified with v0.6.0 on Salt Player 1.19.3 from the Windows Microsoft Store.
-
-| Platform | Distribution channel | Salt Player version | v0.6.0 verification |
+| Platform | Distribution channel | Salt Player version | v0.7.0 verification |
 | --- | --- | --- | --- |
-| Windows | Microsoft Store | 1.19.3 | Passed |
-| Windows | Steam | 1.19.3 | Passed |
-| Linux (Ubuntu 26.04.1 LTS) | Steam | 1.19.3 | Passed |
+| Windows | Microsoft Store | 1.19.3 | Host regression passed |
+| Windows | Steam | 1.19.3 | Desktop test passed before the album action layout change |
+
+Desktop testing on Linux (Ubuntu 26.04.1 LTS), Steam channel, was completed for v0.6.0.
 
 ## Diagnostics and limitations
 
 - Album Details follows the album grouping in Salt Player. Discs assigned to the same album can be stored in separate folders.
-- Press **Ctrl+Alt+U** to find the current CUE sheet or select an external sheet with **Open CUE file…** (“打开 CUE 文件…”). The CUE window can display sheets that reference several files. Double-click a track in the currently playing file to seek to its start.
+- Press **Ctrl+Alt+U** to find the current CUE sheet or select an external sheet with **Open CUE file…** (“打开 CUE 文件…”). The CUE window can display sheets that reference several files. Double-click a library-matched track to play it from the start.
 - If tracks are missing in Album Details, check that the audio files are in the library and grouped under the expected album. For external sheets, also check the `FILE` line and file locations. Use Diagnostics or the native interface report in the CUE window for details.
 - The native UI integrates through Workshop. Some integration points may need to be updated after a Salt Player upgrade.
 
@@ -141,7 +143,7 @@ Use **JDK 25**. The Gradle Wrapper uses **Gradle 9.8.0**. Run the appropriate co
 | Windows | `build.cmd` |
 | Linux | `bash gradlew clean test plugin` |
 
-The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.6.0.spmod`.
+The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.7.0.spmod`.
 
 Licensed under the [MIT License](../LICENSE).
 

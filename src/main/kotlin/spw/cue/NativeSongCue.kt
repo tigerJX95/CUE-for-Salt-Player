@@ -4,11 +4,13 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,8 +21,14 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Composer
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.currentComposer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.internal.ComposableLambda
@@ -30,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,6 +49,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
@@ -62,12 +72,15 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.ref.WeakReference
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
@@ -116,23 +129,48 @@ internal class NativeSongCue(
         val matchedTracks: Int
     )
     private sealed interface RowPlan {
-        data class Original(val index: Int, val artwork: SongArtwork?, val sourceId: String) : RowPlan
+        data class Original(
+            val index: Int, val artwork: SongArtwork?, val sourceId: String, val unprojectedWave: Any? = null
+        ) : RowPlan
         data class Cue(val song: Song) : RowPlan
     }
     private data class GroupPlan(val nativeCount: Int, val rows: List<RowPlan>)
+    private data class LocateRow(val key: String, val track: CueTrack?)
+    private class RenderingGroups(val projection: SongGroups, groups: List<Any>) : List<Any> by groups
+
     private class SongGroups(
         private val groups: List<Any>,
-        val renderingGroups: List<Any>,
+        nativeRows: List<Any>,
         val selectableGroups: List<Any>,
         val cueKeys: Set<String>,
         val entries: List<GroupPlan>,
+        val playbackRows: List<OrderedSong>,
         val playbackTracks: List<AlbumHookTarget.Track>,
         val artistPage: Boolean = false
     ) : List<Any> by groups {
+        // The host's click callback retains this list, including the projection it actually rendered.
+        val renderingGroups = RenderingGroups(this, nativeRows)
         val visibleCueTracks = entries.flatMap { it.rows }.filterIsInstance<RowPlan.Cue>()
             .groupBy({ it.song.source.id }, { it.song.track })
         val selectionEntries = entries.flatMap { it.rows }.filterIsInstance<RowPlan.Cue>()
             .associate { it.song.key to it.song.visibilityKey }
+
+        private val locateRows = buildMap<String, MutableList<LocateRow>> {
+            for (group in this@SongGroups.entries) {
+                for (row in group.rows) {
+                    when (row) {
+                        is RowPlan.Cue -> getOrPut(row.song.source.id, ::mutableListOf).add(LocateRow(row.song.key, row.song.track))
+                        is RowPlan.Original -> if (row.artwork != null) {
+                            getOrPut(row.sourceId, ::mutableListOf).add(LocateRow(row.sourceId, null))
+                        }
+                    }
+                }
+            }
+        }
+
+        fun locateKey(id: String, playing: CueTrack?): String? =
+            locateRows[id]?.firstOrNull { if (playing == null) it.track == null else playing.matchesPlaybackTrack(it.track) }
+                ?.key
         // Success uses structural equality. Searches with the same source file can show different rows.
         override fun equals(other: Any?): Boolean =
             other is SongGroups && groups == other.groups && entries == other.entries && artistPage == other.artistPage
@@ -140,10 +178,13 @@ internal class NativeSongCue(
         override fun hashCode(): Int = 31 * (31 * groups.hashCode() + entries.hashCode()) + artistPage.hashCode()
     }
     private data class ScopeCall(val method: Method, val args: Array<Any?>)
+    private class LocateLayout(val groups: SongGroups, val rows: SongLocateLayout)
 
     private var indexed: WeakReference<List<*>> = WeakReference(null)
     private var indexedCues: Indexed? = null
     private val parsedCues = CueDiscovery.ParsedCueCache()
+    private data class ArtistIndex(val entities: List<*>, val revision: Long, val library: Indexed)
+    @Volatile private var artistIndex: ArtistIndex? = null
     // Preserve rapid off/on requests even when a StateFlow collector skips the intermediate value.
     private data class Activation(val enabled: Boolean, val revision: Long = 0)
     private val mount = MutableStateFlow(Activation(false))
@@ -166,6 +207,9 @@ internal class NativeSongCue(
     private val refreshRevision = MutableStateFlow(0L)
     private val pendingRefresh = mutableSetOf<String>()
     private var publication: Publication? = null
+    private val failedProjection = mutableStateOf<FilterInput?>(null)
+    private val locateLayouts = WeakHashMap<LazyListState, MutableStateFlow<LocateLayout?>>()
+    @Volatile private var locateBinding: NativeSongLocate? = null
     private val previewScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var observedGroups = WeakReference<List<*>>(null)
     private val seekLock = Mutex()
@@ -327,9 +371,20 @@ internal class NativeSongCue(
             try { filter.close() } finally { list.close() }
             throw error
         }
+        val locate = target.selection?.let {
+            try {
+                NativeSongLocate.resolve(target.nativeList)
+            } catch (error: Exception) {
+                diagnostics.failed("接入歌曲页定位", error)
+                null
+            } catch (error: LinkageError) {
+                diagnostics.failed("接入歌曲页定位", error)
+                null
+            }
+        }
         val selection = target.selection?.let { binding ->
             try {
-                installSelection(binding)
+                installSelection(binding, locate)
             } catch (error: Exception) {
                 diagnostics.failed("接入歌曲页选择", error)
                 null
@@ -338,12 +393,34 @@ internal class NativeSongCue(
                 null
             }
         }
+        val orderedStarts = try {
+            installOrderedStarts()
+        } catch (error: Exception) {
+            diagnostics.failed("接入歌曲页顺序点播", error)
+            null
+        } catch (error: LinkageError) {
+            diagnostics.failed("接入歌曲页顺序点播", error)
+            null
+        }
+        val locateHook = try {
+            if (selection != null && locate != null) installLocate(locate).also { locateBinding = locate } else null
+        } catch (error: Exception) {
+            diagnostics.failed("接入歌曲页定位", error)
+            null
+        } catch (error: LinkageError) {
+            diagnostics.failed("接入歌曲页定位", error)
+            null
+        }
         val artist = try {
+            val binding = ArtistSongTarget.resolve(target.nativeList)
             NativeArtistSongs(
-                ArtistSongTarget.resolve(target.nativeList), active,
+                binding, active,
                 automaticEnabled.map { it.enabled }, hideWholeTrack,
                 visibility?.hidden ?: flowOf(emptySet()), refreshRevision,
-                ::projectArtistGroups,
+                { groups, hide, excluded, search ->
+                    if (search != null && binding.search != null) projectArtistSearch(binding.search, search, hide, excluded)
+                    else projectArtistGroups(groups, hide, excluded)
+                },
                 { diagnostics.artistPage = it }
             ).install().also { diagnostics.artistPage = "已注册，等待艺术家歌曲列表" }
         } catch (error: Exception) {
@@ -357,6 +434,9 @@ internal class NativeSongCue(
         previewScope.launch { watchAutomatic() }
         return AutoCloseable {
             runCatching { artist?.close() }
+            locateBinding = null
+            runCatching { locateHook?.close() }
+            runCatching { orderedStarts?.close() }
             stopMount()
             previewScope.cancel()
             latestInput.value = null
@@ -371,7 +451,154 @@ internal class NativeSongCue(
         }
     }
 
-    private fun installSelection(binding: NativeSongSelection): AutoCloseable {
+    private fun installLocate(locate: NativeSongLocate): AutoCloseable {
+        val host = HostCurrentPlayback()
+        val bar = locate.scrollbar
+        return WorkshopApi.hookRegistrar.afterComposable(
+            bar.declaringClass.name, bar.name, locate.caller.name,
+            bar.parameterTypes.takeWhile { it != Composer::class.java }.map { it.name }, 50
+        ) { call ->
+            val scope = call.arguments[0] as? BoxScope
+            val state = call.arguments[1] as? LazyListState
+            if (active() && state != null && scope != null) {
+                val layouts = remember(state) { layoutFor(state) }
+                val padding = call.arguments[2] as? Modifier ?: Modifier
+                CueLocateButton(layouts, state, locate, host, with(scope) {
+                    Modifier.align(Alignment.BottomEnd).then(padding).padding(end = 16.dp, bottom = 16.dp)
+                })
+            }
+        }
+    }
+
+    private fun layoutFor(state: LazyListState): MutableStateFlow<LocateLayout?> =
+        synchronized(locateLayouts) { locateLayouts.getOrPut(state) { MutableStateFlow(null) } }
+
+    private fun groupsForDrawing(groups: Any?): Any? {
+        if (groups is SongGroups || !active() || !mount.value.enabled) return groups
+        val input = latestInput.value ?: return groups
+        // The host can publish its raw groups before the background CUE projection is ready.
+        if (failedProjection.value === input || target.groupEntities(input.original) !== groups) return groups
+        val previous = synchronized(publishLock) { publication } ?: return groups
+        if (previous.flow !== pageState.value || previous.input.sort != input.sort ||
+            previous.input.grouped != input.grouped || previous.input.query != input.query ||
+            previous.hideWhole != hideWholeTrack() || previous.excluded != visibility?.hidden?.value.orEmpty() ||
+            target.count(previous.input.original) != target.count(input.original)
+        ) return groups
+        return target.groupEntities(previous.value)
+    }
+
+    @Composable
+    private fun CueLocateButton(
+        layouts: StateFlow<LocateLayout?>, state: LazyListState, locate: NativeSongLocate,
+        host: HostCurrentPlayback, modifier: Modifier
+    ) {
+        val item = host.current.collectAsState().value ?: return
+        val id = host.id.invoke(item) as? String ?: return
+        val playing = currentTrack()
+        val layout = layouts.collectAsState().value
+        val key = remember(layout, id, playing) { layout?.groups?.locateKey(id, playing) }
+        var requestedKey by remember(state, item, playing) { mutableStateOf<String?>(null) }
+        val request = requestedKey
+        val offset = with(LocalDensity.current) { -36.dp.roundToPx() }
+        LaunchedEffect(state, item, playing, request, offset) {
+            if (request != null) {
+                locateSong(layouts, state, request, offset) { active() && host.current.value === item }
+                requestedKey = null
+            }
+        }
+        if (key != null) locate.Button(modifier) { requestedKey = key }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun locateSong(
+        layouts: StateFlow<LocateLayout?>, state: LazyListState, key: String, offset: Int, stillPlaying: () -> Boolean
+    ) {
+        withTimeoutOrNull(2_000L) {
+            layouts.transformLatest { layout ->
+                val index = layout?.rows?.indexOf(key) ?: return@transformLatest
+                snapshotFlow { !state.isScrollInProgress && layout.rows.matches(state.layoutInfo) }.first { it }
+                val measured = state.layoutInfo
+                if (layouts.value !== layout || !stillPlaying() ||
+                    state.isScrollInProgress || !layout.rows.matches(measured)
+                ) return@transformLatest
+                val delta = layout.rows.visibleRevealDelta(measured, key, -offset)
+                // Relative scrolling keeps the measured row and its neighbors composed.
+                when (delta) {
+                    null -> state.scrollToItem(index, offset)
+                    0 -> Unit
+                    else -> state.scrollBy(delta.toFloat())
+                }
+                emit(Unit)
+            }.first()
+        }
+    }
+
+    private fun installOrderedStarts(): AutoCloseable {
+        val hooks = mutableListOf<AutoCloseable>()
+        try {
+            for (method in target.orderedStartCallbacks()) {
+                hooks += WorkshopApi.hookRegistrar.hookMethod(
+                    method.declaringClass.name, method.name, method.parameterTypes.map { it.name }, 50
+                ) { before { beforeOrderedStart(it) } }
+            }
+        } catch (error: Throwable) {
+            hooks.asReversed().forEach { runCatching { it.close() } }
+            throw error
+        }
+        return AutoCloseable { hooks.asReversed().forEach { runCatching { it.close() } } }
+    }
+
+    private fun beforeOrderedStart(call: MethodHookParam) {
+        if (!active() || call.isOriginalSkipped) return
+        try {
+            val selection = call.args[1]
+            val mode = selection as? Enum<*>
+            val selectedSource = if (mode == null) {
+                val entity = checkNotNull(selection)
+                AlbumHookTarget.Track(target.id(entity), entity).also {
+                    CueAlbumSequence.clear()
+                    CueSongOrder.startWholeFile(it, active)
+                }
+            } else null
+            if (call.args.getOrNull(2) == true) return
+            val visible = orderedStartGroups(call.args.firstOrNull())
+            if (visible == null) {
+                if (mode != null) CueSongOrder.clear()
+                return
+            }
+            val index = if (selectedSource == null) 0 else visible.playbackRows.indexOfFirst {
+                it.source.id == selectedSource.id && it.cue == null
+            }
+            if (index < 0) return
+            if (!CueSongOrder.isOrdered(mode?.name ?: target.playback.playbackMode())) {
+                if (selectedSource == null) CueSongOrder.clear()
+                else CueSongOrder.remember(visible.playbackRows, index, active, playVisibleSong(visible))
+                return
+            }
+            mode?.let(target.playback::changeMode)
+            beginOrderedPlayback(visible, index)
+            call.setResult(Unit)
+        } catch (error: Exception) {
+            diagnostics.failed("歌曲页顺序点播", error)
+        } catch (error: LinkageError) {
+            diagnostics.failed("歌曲页顺序点播", error)
+        }
+    }
+
+    private fun orderedStartGroups(input: Any?): SongGroups? =
+        ((input as? SongGroups) ?: (input as? RenderingGroups)?.projection)
+            ?.takeIf { !it.artistPage && it.cueKeys.isNotEmpty() }
+
+    private fun beginOrderedPlayback(groups: SongGroups, index: Int) {
+        CueAlbumSequence.clear()
+        CueSongOrder.start(groups.playbackRows, index, active, play = playVisibleSong(groups))
+    }
+
+    private fun playVisibleSong(groups: SongGroups): (OrderedSong, Boolean, Boolean) -> Unit = { row, change, first ->
+        target.playback.playAt(row.source, row.cue?.startMs ?: 0L, change, groups.playbackTracks, replaceQueue = first)
+    }
+
+    private fun installSelection(binding: NativeSongSelection, locate: NativeSongLocate?): AutoCloseable {
         val menu = binding.guardBatchMenu(target::id)
         val nativeGroups = WeakHashMap<Any, List<Any>>()
         val setter = binding.groupSetter
@@ -380,11 +607,13 @@ internal class NativeSongCue(
                 before { call ->
                     val selector = call.thisObject ?: return@before
                     val argument = call.args[0]
-                    val projected = argument as? SongGroups
+                    val projected = groupsForDrawing(argument) as? SongGroups
                     synchronized(nativeGroups) {
                         if (call.isOriginalSkipped || !selectionReady) return@synchronized
                         if (projected == null && selector !in nativeGroups) return@synchronized
                         binding.removeHiddenCueKeys(selector, projected?.cueKeys.orEmpty())
+                        val layout = locate?.scrollState(selector)?.let(::layoutFor)
+                        if (layout?.value?.groups != projected) layout?.value = null
                         if (projected == null) {
                             nativeGroups.remove(selector)
                         } else {
@@ -413,6 +642,10 @@ internal class NativeSongCue(
                         setter.invoke(selector, original)
                     }
                 } finally {
+                    synchronized(locateLayouts) {
+                        locateLayouts.values.forEach { it.value = null }
+                        locateLayouts.clear()
+                    }
                     try { groups.close() } finally { menu.close() }
                 }
             }
@@ -463,12 +696,17 @@ internal class NativeSongCue(
         ) return
         if (state != input.original && (!ownsState || current.input.original != input.original)) return
 
-        val projected = inspect(input, hideWhole, apply = true, cached = false, excluded, revision, ownsState) ?: return
+        val projected = inspect(input, hideWhole, apply = true, cached = false, excluded, revision, ownsState)
         synchronized(publishLock) {
             if (!active() || !mount.value.enabled || pageState.value !== flow || latestInput.value !== input ||
                 hideWholeTrack() != hideWhole || visibility?.hidden?.value.orEmpty() != excluded || flow.value !== state ||
                 refreshRevision.value != revision
             ) return
+            if (projected == null) {
+                failedProjection.value = input
+                return
+            }
+            failedProjection.value = null
             if (!flow.compareAndSet(state, projected)) return
             if (projected === input.original) {
                 publication = null
@@ -497,6 +735,7 @@ internal class NativeSongCue(
             }
         }
         publication = null
+        failedProjection.value = null
     }
 
     fun afterFilter(call: MethodHookParam) {
@@ -522,7 +761,18 @@ internal class NativeSongCue(
             }
             val input = FilterInput(entities, state, sort, grouped, query)
             observedGroups = WeakReference(target.groupEntities(state))
-            latestInput.value = input
+            synchronized(publishLock) {
+                val previous = publication
+                if (diagnosing && mount.value.enabled && previous != null &&
+                    previous.flow === pageState.value && previous.flow.value === previous.value &&
+                    previous.input == input && previous.revision == refreshRevision.value &&
+                    previous.hideWhole == hideWholeTrack() && previous.excluded == visibility?.hidden?.value.orEmpty()
+                ) {
+                    // Keep the native StateFlow on the existing projection for an equivalent result.
+                    call.setResult(previous.value)
+                }
+                latestInput.value = input
+            }
             if (diagnosing && !mount.value.enabled) latestInput.value?.let { current ->
                 previewScope.launch { inspect(current, hideWholeTrack(), apply = false, cached = false) }
             }
@@ -590,7 +840,8 @@ internal class NativeSongCue(
     }
 
     private fun index(entities: List<*>, refreshIds: Set<String>): Indexed {
-        val cached = indexedCues?.takeIf { indexed.get() === entities }
+        val previous = indexedCues
+        val cached = previous?.takeIf { indexed.get() === entities }
         if (cached != null && refreshIds.isEmpty()) return cached
         val catalogue = cached?.catalogue ?: catalogue(entities)
         val refreshedPaths = catalogue.pathsFor(refreshIds)
@@ -603,7 +854,15 @@ internal class NativeSongCue(
         }
         // Duplicate native IDs can compete for the same synthetic ID. Rebuild in host order then.
         val reusable = cached?.takeIf { catalogue.hasUniqueIds }
-        val updated = if (reusable == null) buildIndex(catalogue, cues) else updateIndex(reusable, cues, refreshedPaths)
+        val updated = if (reusable == null) {
+            // A fresh Track list can still describe the same songs and already decoded covers.
+            val artwork = previous?.songs?.values.orEmpty()
+                .filterNot { it.source.id in refreshIds }
+                .associate { it.source.entity to it.artwork }
+            buildIndex(catalogue, cues, artwork)
+        } else {
+            updateIndex(reusable, cues, refreshedPaths)
+        }
         indexed = WeakReference(entities)
         indexedCues = updated
         return updated
@@ -619,7 +878,9 @@ internal class NativeSongCue(
         )
     }
 
-    private fun buildIndex(catalogue: CueSongSources, cues: Map<Path, LocatedCue>): Indexed {
+    private fun buildIndex(
+        catalogue: CueSongSources, cues: Map<Path, LocatedCue>, artwork: Map<Any, SongArtwork> = emptyMap()
+    ): Indexed {
         val songs = mutableMapOf<String, Song>()
         val sources = mutableMapOf<Any, List<ProjectedTrack>>()
         var matchedSources = 0
@@ -631,7 +892,7 @@ internal class NativeSongCue(
             if (segments.isEmpty()) continue
             matchedSources++
             matchedTracks += segments.size
-            projectSource(source, sheet, segments, catalogue.originalIds, songs, sources)
+            projectSource(source, sheet, segments, catalogue.originalIds, songs, sources, artwork[source.entity])
         }
         return Indexed(catalogue, sources, songs, cues, matchedSources, matchedTracks)
     }
@@ -661,7 +922,7 @@ internal class NativeSongCue(
 
     private fun projectSource(
         input: CueSongSource, sheet: CueSheet, segments: List<CueTrack>, originalIds: Set<String>,
-        songs: MutableMap<String, Song>, sources: MutableMap<Any, List<ProjectedTrack>>
+        songs: MutableMap<String, Song>, sources: MutableMap<Any, List<ProjectedTrack>>, cachedArtwork: SongArtwork? = null
     ) {
         val (entity, id, audio) = input
         if (id.isBlank() || !Files.isRegularFile(audio) || !Files.isReadable(audio)) return
@@ -669,7 +930,7 @@ internal class NativeSongCue(
         val source = AlbumHookTarget.Track(id, entity)
         val sourceArtist = target.artist(entity).orEmpty()
         val album = target.album(entity) ?: sheet.title.orEmpty()
-        val artwork = SongArtwork(id, audio)
+        val artwork = cachedArtwork ?: SongArtwork(id, audio)
         val split = buildList {
             for (segment in segments) {
                 val window = CuePlaybackWindow.from(segment, fileDuration) ?: continue
@@ -698,15 +959,40 @@ internal class NativeSongCue(
         val library = buildIndex(catalogue, matches)
         if (library.songs.isEmpty()) return null
         val expanded = originals.map { group ->
-            val rows = buildList {
-                for (entity in target.tracksIn(group).filterNotNull()) {
-                    val split = library.sources[entity]
-                    if (!hide || split == null) add(entity)
-                    split?.forEach { if (it.song.visibilityKey !in excluded) add(it.entity) }
-                }
-            }
+            val rows = artistRows(target.tracksIn(group), library, hide, excluded)
             target.replaceTracks(group, rows)
         }
+        return artistProjection(expanded, library)
+    }
+
+    fun projectArtistSearch(
+        binding: ArtistSongSearchBinding, search: ArtistSongSearch, hide: Boolean, excluded: Set<String>
+    ): ArtistSongProjection? {
+        if (!active()) return null
+        val revision = refreshRevision.value
+        val library = artistIndex?.takeIf { it.entities == search.tracks && it.revision == revision }?.library
+            ?: catalogue(search.tracks).let { catalogue ->
+                val matches = CueDiscovery.findAll(catalogue.all.map(CueSongSource::audio), active = active)
+                buildIndex(catalogue, matches).also { artistIndex = ArtistIndex(search.tracks, revision, it) }
+            }
+        if (library.songs.isEmpty()) return null
+        val rows = artistRows(search.tracks, library, hide, excluded).filter {
+            target.matchesArtistSearch(it, search.query)
+        }
+        val expanded = binding.group(rows).map { (key, tracks) -> target.groupOf(key, tracks as List<*>) }
+        return artistProjection(expanded, library)
+    }
+
+    private fun artistRows(tracks: List<*>, library: Indexed, hide: Boolean, excluded: Set<String>): List<Any> =
+        buildList {
+            for (entity in tracks.filterNotNull()) {
+                val split = library.sources[entity]
+                if (!hide || split == null) add(entity)
+                split?.forEach { if (it.song.visibilityKey !in excluded) add(it.entity) }
+            }
+        }
+
+    private fun artistProjection(expanded: List<Any>, library: Indexed): ArtistSongProjection? {
         val songs = remapGroups(expanded, library.songs, artistPage = true)
         return ArtistSongProjection(songs, songs.entries.sumOf { it.rows.size }).takeIf { active() }
     }
@@ -734,11 +1020,27 @@ internal class NativeSongCue(
             nativeGroups.add(target.replaceTracks(group, originals.filter { target.id(it) !in cueSources }))
             target.replaceTracks(group, originals)
         }
-        val playbackTracks = groups.flatMap { target.tracksIn(it).filterNotNull() }.map { entity ->
+        val playbackRows = groups.flatMap { target.tracksIn(it).filterNotNull() }.map { entity ->
             val id = target.id(entity)
-            songs[id]?.source ?: AlbumHookTarget.Track(id, entity)
-        }.distinctBy { it.id }
-        return SongGroups(nativeGroups, renderingGroups, groups, cueKeys, rowPlans, playbackTracks, artistPage)
+            val song = songs[id]
+            OrderedSong(song?.source ?: AlbumHookTarget.Track(id, entity), song?.track)
+        }
+        val playbackTracks = playbackRows.map { it.source }.distinctBy { it.id }
+        return SongGroups(nativeGroups, renderingGroups, groups, cueKeys, rowPlans, playbackRows, playbackTracks, artistPage)
+    }
+
+    private fun unprojectedCoverRows(groups: List<*>): List<GroupPlan>? {
+        var hasWave = false
+        val plans = groups.map { group ->
+            val tracks = target.tracksIn(checkNotNull(group))
+            val rows = tracks.mapIndexed { index, track ->
+                val wave = track?.takeIf { target.path(it)?.isWaveAudio() == true }
+                if (wave != null) hasWave = true
+                RowPlan.Original(index, null, wave?.let(target::id).orEmpty(), wave)
+            }
+            GroupPlan(tracks.size, rows)
+        }
+        return plans.takeIf { hasWave }
     }
 
     fun beforeList(call: MethodHookParam) {
@@ -750,22 +1052,27 @@ internal class NativeSongCue(
         diagnostics.listEntered()
         if (call.isOriginalSkipped) return
         val candidate = call.args.firstOrNull()
-        val groups = candidate as? SongGroups
-        if (!diagnosing && groups?.artistPage != true) return
-        if (groups == null) {
-            if (candidate != null && candidate === observedGroups.get()) {
-                diagnostics.observedNativeList()
-            }
-            return
+        val groups = (groupsForDrawing(candidate) as? SongGroups)?.takeIf { diagnosing || it.artistPage }
+        val selection = target.selection.takeIf { selectionReady }
+        val selector = selection?.let { binding ->
+            call.args.firstOrNull { binding.groupSetter.declaringClass.isInstance(it) }
         }
-        val scope = call.args.lastOrNull() ?: return
+        val locateState = if (groups?.artistPage == true || selector == null) null else {
+            runCatching { locateBinding?.scrollState(selector) }.getOrNull()
+        }
         try {
+            val plans = groups?.entries ?: (candidate as? List<*>)
+                ?.takeUnless { it is SongGroups || it is RenderingGroups }?.let(::unprojectedCoverRows)
+            if (groups == null) {
+                locateState?.let(::clearLocateLayout)
+                if (diagnosing && candidate != null && candidate === observedGroups.get()) {
+                    diagnostics.observedNativeList()
+                }
+            }
+            if (plans == null) return
+            val scope = call.args.lastOrNull() ?: return
             val entries = mutableListOf<ScopeCall>()
             val scopeType = target.listBuilder.parameterTypes.last()
-            val selection = target.selection.takeIf { selectionReady }
-            val selector = selection?.let { binding ->
-                call.args.firstOrNull { binding.groupSetter.declaringClass.isInstance(it) }
-            }
             val selectionState = selection?.state(selector)
             var capturing = true
             val proxy = Proxy.newProxyInstance(scopeType.classLoader, arrayOf(scopeType)) { _, method, args ->
@@ -778,44 +1085,73 @@ internal class NativeSongCue(
                 }
             }
             val result = try {
-                call.args[0] = groups.renderingGroups
+                call.args[0] = groups?.renderingGroups ?: candidate
                 call.args[call.args.lastIndex] = proxy
                 call.invokeOriginal()
             } finally {
                 capturing = false
-                call.args[0] = groups
+                call.args[0] = candidate
                 call.args[call.args.lastIndex] = scope
             }
             if (!active()) return
             var group = 0
             val render = entries.map { entry ->
                 if (entry.method == target.itemBatch) {
-                    val items = groups.entries.getOrNull(group++) ?: error("歌曲列表批次与分组不匹配")
+                    val items = plans.getOrNull(group++) ?: error("歌曲列表批次与分组不匹配")
                     check(entry.args.first() == items.nativeCount) { "歌曲列表曲目数量不匹配" }
-                    ScopeCall(entry.method, withCueRows(entry.args, items.rows, groups.visibleCueTracks, groups.playbackTracks,
-                        groups.selectionEntries, selection, selectionState))
+                    ScopeCall(entry.method, withCueRows(entry.args, items.rows, groups, selection, selectionState))
                 } else entry
             }
-            check(group == groups.entries.size) { "歌曲列表批次缺失" }
+            check(group == plans.size) { "歌曲列表批次缺失" }
             // The host ignores the Unit returned by this list-content lambda.
             call.setResult(result)
             for (entry in render) invoke(entry.method, scope, entry.args)
-            diagnostics.submitted(groups.entries.sumOf { it.rows.size })
+            if (groups != null) {
+                locateState?.let { publishLocateLayout(it, groups, render) }
+                diagnostics.submitted(plans.sumOf { it.rows.size })
+            }
         } catch (error: Exception) {
+            locateState?.let(::clearLocateLayout)
             diagnostics.failed("列表提交", error)
         } catch (error: LinkageError) {
+            locateState?.let(::clearLocateLayout)
             diagnostics.failed("列表提交", error)
         }
     }
 
+    private fun clearLocateLayout(state: LazyListState) {
+        synchronized(locateLayouts) { locateLayouts[state]?.value = null }
+    }
+
+    private fun publishLocateLayout(state: LazyListState, groups: SongGroups, render: List<ScopeCall>) {
+        val layout = layoutFor(state)
+        if (layout.value?.groups == groups) return
+        val beforeMeasure = Snapshot.withoutReadObservation { state.layoutInfo }
+        layout.value = locateLayout(render, beforeMeasure)?.let { LocateLayout(groups, it) }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun locateLayout(render: List<ScopeCall>, beforeMeasure: LazyListLayoutInfo): SongLocateLayout? {
+        val keys = mutableListOf<Any>()
+        for (entry in render) {
+            if (entry.method == target.itemBatch) {
+                val count = entry.args[0] as Int
+                val key = entry.args[1] as? (Int) -> Any? ?: return null
+                repeat(count) { keys.add(key(it) ?: return null) }
+            } else {
+                if (entry.args.size != 3) return null
+                keys.add(entry.args[0] ?: return null)
+            }
+        }
+        return SongLocateLayout(keys, beforeMeasure)
+    }
+
     @Suppress("UNCHECKED_CAST")
     private fun withCueRows(
-        original: Array<Any?>, rows: List<RowPlan>, visibleCueTracks: Map<String, List<CueTrack>>,
-        playbackTracks: List<AlbumHookTarget.Track>,
-        selectionEntries: Map<String, String>,
+        original: Array<Any?>, rows: List<RowPlan>, groups: SongGroups?,
         selection: NativeSongSelection?, selectionState: Any?
     ): Array<Any?> {
-        if (rows.all { it is RowPlan.Original && it.artwork == null }) return original
+        if (rows.all { it is RowPlan.Original && it.artwork == null && it.unprojectedWave == null }) return original
         val key = original[1] as (Int) -> Any?
         val type = original[2] as (Int) -> Any?
         val flag = original[3] as (Int) -> Boolean
@@ -837,39 +1173,63 @@ internal class NativeSongCue(
         val rowContent: @Composable (Any, Int) -> Unit = { scope, i ->
             when (val row = rows[i]) {
                 is RowPlan.Original -> {
-                    val playing = currentTrack()
-                    val suppress = visibleCueTracks[row.sourceId]?.any { it.matchesPlaybackTrack(playing) } == true
-                    CompositionLocalProvider(LocalCueSongArtwork provides row.artwork) {
-                        val composer = currentComposer
-                        if (suppress) {
-                            withoutAlbumRowAccent { content(scope, row.index, composer, 0) }
-                        } else {
-                            content(scope, row.index, composer, 0)
+                    val tracks = groups?.visibleCueTracks?.get(row.sourceId)
+                    val playing = if (tracks != null) currentTrack() else null
+                    val suppress = tracks?.any { it.matchesPlaybackTrack(playing) } == true
+                    val wave = row.artwork?.takeIf { it.isWave } ?: row.unprojectedWave?.let { track ->
+                        val revision by refreshRevision.collectAsState()
+                        remember(track, revision) { SongArtwork(row.sourceId) { target.audioPath(track) } }
+                    }
+                    if (wave != null && active()) {
+                        WholeWaveRow(wave) {
+                            NeutralNativeRowAccent(suppress) {
+                                content(scope, row.index, currentComposer, 0)
+                            }
+                        }
+                    } else {
+                        CompositionLocalProvider(LocalCueSongArtwork provides row.artwork) {
+                            NeutralNativeRowAccent(suppress) {
+                                content(scope, row.index, currentComposer, 0)
+                            }
                         }
                     }
                 }
-                is RowPlan.Cue -> SongRowMenu(row.song, selection, selectionState, playbackTracks, selectionEntries)
+                is RowPlan.Cue -> SongRowMenu(row.song, selection, selectionState, checkNotNull(groups))
             }
         }
         return arrayOf(rows.size, rowKey, rowType, rowFlag, rowOverlay, rowContent)
     }
 
     @Composable
-    private fun SongRowMenu(song: Song, selection: NativeSongSelection?, selectionState: Any?, playbackTracks: List<AlbumHookTarget.Track>,
-        selectionEntries: Map<String, String>) {
+    private fun WholeWaveRow(artwork: SongArtwork, native: @Composable () -> Unit) {
+        val cover = artwork.cover()
+        Box(Modifier.fillMaxWidth()) {
+            native()
+            cover?.image?.let { image ->
+                // Native TrackItemContent centers its leading 48 dp thumbnail inside the row.
+                val inset = nativeSongRowTheme().gap.dp
+                Image(image, null, Modifier.align(Alignment.CenterStart).offset(x = inset)
+                    .size(48.dp).clip(RoundedCornerShape(4.dp)), contentScale = ContentScale.Crop)
+            }
+        }
+        SideEffect { diagnostics.wholeCover(cover?.status, cover?.image != null) }
+    }
+
+    @Composable
+    private fun SongRowMenu(song: Song, selection: NativeSongSelection?, selectionState: Any?, groups: SongGroups) {
         val store = visibility
         if (store == null) {
-            SongRow(song, selection, selectionState, playbackTracks)
+            SongRow(song, selection, selectionState, groups)
         } else {
             val items = CueRemoval.menu(
                 { changeVisibility { store.hide(song.visibilityKey) } },
                 { changeVisibility { store.remove(song.visibilityKey) } },
-                { selectedRemovalEntries(selection, selectionState, selectionEntries) },
+                { selectedRemovalEntries(selection, selectionState, groups.selectionEntries) },
                 { removeSelectedEntries(store, it) },
                 { hideSelectedEntries(store, it) }
             )
             SongContextMenu(items) {
-                SongRow(song, selection, selectionState, playbackTracks)
+                SongRow(song, selection, selectionState, groups)
             }
         }
     }
@@ -893,7 +1253,7 @@ internal class NativeSongCue(
     }
 
     @Composable
-    private fun SongRow(song: Song, selection: NativeSongSelection?, selectionState: Any?, playbackTracks: List<AlbumHookTarget.Track>) {
+    private fun SongRow(song: Song, selection: NativeSongSelection?, selectionState: Any?, groups: SongGroups) {
         var seeking by remember(song.key) { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
         val hostTheme = nativeSongRowTheme()
@@ -931,7 +1291,18 @@ internal class NativeSongCue(
                                 val context = currentCoroutineContext()
                                 seekLock.withLock {
                                     LibraryProbe.playAlbumTrack(song.track, song.fileDuration, { active() && context.isActive }) { at, change ->
-                                        target.playback.playAt(song.source, at, change, playbackTracks)
+                                        val index = groups.playbackRows.indexOfFirst { it.cue === song.track }
+                                        val fromSongs = !groups.artistPage && index >= 0
+                                        if (fromSongs) {
+                                            val ordered = CueSongOrder.isOrdered(target.playback.playbackMode())
+                                            CueAlbumSequence.clear()
+                                            CueSongOrder.start(groups.playbackRows, index, active, replaceQueue = ordered,
+                                                switchSource = ordered || change, play = playVisibleSong(groups))
+                                        } else {
+                                            CueAlbumSequence.clear()
+                                            CueSongOrder.clear()
+                                            target.playback.playAt(song.source, at, change, groups.playbackTracks)
+                                        }
                                     }
                                 }
                             }

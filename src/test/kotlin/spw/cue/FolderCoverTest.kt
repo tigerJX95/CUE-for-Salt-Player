@@ -78,6 +78,20 @@ class FolderCoverTest {
         assertEquals(Color.BLUE.rgb, FolderCover.loadCatalog(album.resolve("disc.wav").toPath())?.getRGB(0, 0))
     }
 
+    @Test fun songThumbnailUsesItsFolderThenTheSharedCoverForDiscFolders() {
+        val album = temp.newFolder("多碟")
+        val cd1 = album.resolve("CD1").apply { mkdir() }
+        val cd2 = album.resolve("CD2").apply { mkdir() }
+        val unrelated = album.resolve("其他音频").apply { mkdir() }
+        writeImage(album.resolve("folder.png"), "png", Color.RED)
+        writeImage(cd1.resolve("cover.png"), "png", Color.BLUE)
+        cd2.resolve("cover.png").writeText("broken png")
+
+        assertEquals(Color.BLUE.rgb, FolderCover.loadSong(cd1.resolve("整轨.wav").toPath())?.getRGB(0, 0))
+        assertEquals(Color.RED.rgb, FolderCover.loadSong(cd2.resolve("整轨.wav").toPath())?.getRGB(0, 0))
+        assertNull(FolderCover.loadSong(unrelated.resolve("整轨.wav").toPath()))
+    }
+
     @Test fun downsamplesLargeCoversBeforeDisplayingThem() {
         val cover = temp.newFile("cover.png")
         ImageIO.write(BufferedImage(2048, 1024, BufferedImage.TYPE_INT_RGB), "png", cover)

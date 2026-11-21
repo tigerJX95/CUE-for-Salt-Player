@@ -28,11 +28,12 @@ internal object HostCatalog {
     private val markers = listOf(
         "AlbumContentScreen.kt:", "TrackLazyColumn (TrackLazyColumn.kt:", "TrackScreen (TrackScreen.kt:",
         "toPiscesMediaItem", "AlbumCover (AlbumCover.kt:", "ArtistCoverImage (ArtistCoverImage.kt:",
-        "TrackItemContent (TrackItem.kt:",
-        "TrackPage (ArtistContentScreen.kt:", "ArtistContentScreen (ArtistContentScreen.kt:",
+        "TrackItemContent (TrackItem.kt:", "GoToNowPlaying (GoToNowPlaying.kt:",
+        "TrackPage (ArtistContentScreen.kt:", "ArtistContentScreen (ArtistContentScreen.kt:", "ArtistWithTracks",
         "MiniPlayer (MiniPlayerContent.kt:", "MiniPlayerCoverItem (MiniPlayerCoverItem.kt:",
         "MiniPlayerControl (MiniPlayerControl.kt:", "MiniTimeSeekbar (MiniTime.kt:", "MiniTimeText (MiniTime.kt:",
-        "MainWindow (MainWindow.kt:", "updateMainWindowVisible", "Failed to update taskbar progress"
+        "MainWindow (MainWindow.kt:", "updateMainWindowVisible", "Failed to update taskbar progress",
+        "mixStreamCallback.onEnded"
     )
     private val index by lazy { scan() }
 
@@ -78,10 +79,13 @@ internal object HostCatalog {
     fun code(method: Method): List<CodeElement> = code(method.declaringClass, method.name, method.hostDescriptor())
     fun calls(method: Method): List<InvokeInstruction> = code(method).filterIsInstance<InvokeInstruction>()
 
-    fun constructorCalls(constructor: Constructor<*>): List<InvokeInstruction> {
+    fun code(constructor: Constructor<*>): List<CodeElement> {
         val signature = MethodType.methodType(Void.TYPE, constructor.parameterTypes.toList()).descriptorString()
-        return code(constructor.declaringClass, "<init>", signature).filterIsInstance<InvokeInstruction>()
+        return code(constructor.declaringClass, "<init>", signature)
     }
+
+    fun constructorCalls(constructor: Constructor<*>): List<InvokeInstruction> =
+        code(constructor).filterIsInstance<InvokeInstruction>()
 
     fun tracedMethods(marker: String): List<Method> = candidates(marker).flatMap { name ->
         type(name).declaredMethods.filter { method ->
@@ -136,7 +140,8 @@ internal object HostCatalog {
                     val name = entry.name
                     if (!name.endsWith(".class") || entry.size !in 1..262_144 ||
                         !(name.startsWith("androidx/compose/ui/") && name.count { it == '/' } == 3 ||
-                            name.startsWith("com/xuncorp/voxzen/ui/"))) continue
+                            name.startsWith("com/xuncorp/voxzen/ui/") ||
+                            owner.startsWith("com/xuncorp/pisces/") && name.startsWith("com/xuncorp/pisces/"))) continue
                     scannedBytes += entry.size
                     check(scannedBytes <= 128L * 1024 * 1024)
                     val bytes = zip.getInputStream(entry).use { it.readNBytes(entry.size.toInt() + 1) }
@@ -160,8 +165,7 @@ internal object HostCatalog {
         val owner = constructor.declaringClass
         val internal = owner.name.replace('.', '/')
         val parameters = constructor.parameterTypes
-        val signature = MethodType.methodType(Void.TYPE, parameters.toList()).descriptorString()
-        val body = code(owner, "<init>", signature).filterIsInstance<Instruction>()
+        val body = code(constructor).filterIsInstance<Instruction>()
         var slot = 1
         return parameters.map { parameter ->
             val field = body.windowed(3).mapNotNull { (receiver, value, write) ->
@@ -202,7 +206,7 @@ internal object HostCatalog {
                 val name = entry.name
                 if (!name.endsWith(".class") || entry.size !in 1..262_144 ||
                     !(name.startsWith("androidx/compose/ui/") && name.count { it == '/' } == 3 ||
-                        name.startsWith("com/xuncorp/voxzen/ui/"))
+                        name.startsWith("com/xuncorp/voxzen/ui/") || name.startsWith("com/xuncorp/pisces/"))
                 ) continue
                 scannedBytes += entry.size
                 check(scannedBytes <= 128L * 1024 * 1024) { "宿主定位超过读取上限" }

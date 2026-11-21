@@ -76,4 +76,21 @@ class CueQueueContinuationTest {
     @Test fun aSourceOutsideBothScopesDoesNotInventUnrelatedLibraryEntries() {
         assertEquals(CuePlaybackScope(listOf(original), 0), cuePlaybackScope(listOf(regular), listOf(regular), original))
     }
+
+    @Test fun albumDiscMovesAfterTheCurrentItemWithoutDroppingTheRestOfTheQueue() {
+        val second = CuePlaybackSource("CD2", Path.of("CD2.wav"), Any())
+        val before = CuePlaybackSource("earlier", Path.of("earlier.wav"), Any())
+        val after = CuePlaybackSource("later", Path.of("later.wav"), Any())
+        val ordered = listOf(before, dragged, second, regular, after)
+        assertEquals(CuePlaybackScope(ordered, 2),
+            followAlbumDisc(listOf(before, dragged, regular, second, after), original.id, cueAudio, second))
+        assertEquals(CuePlaybackScope(ordered, 2),
+            followAlbumDisc(listOf(before, dragged, regular, after), original.id, cueAudio, second))
+        assertEquals(CuePlaybackScope(ordered, 2),
+            followAlbumDisc(ordered, original.id, cueAudio, second))
+        val duplicate = listOf(before, original, second, dragged, regular, after)
+        assertEquals(CuePlaybackScope(listOf(before, original, dragged, second, regular, after), 3),
+            followAlbumDisc(duplicate, original.id, cueAudio, second, currentIndex = 3))
+        assertNull(followAlbumDisc(listOf(regular), original.id, cueAudio, second))
+    }
 }

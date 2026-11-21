@@ -15,6 +15,7 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
     private class Entry(val method: Method, val args: Array<out Any?>) {
         val footer get() = args.size == 3 && args[0] == "footer"
         val wholeTrack get() = args.size == 6 && args[0] == 1
+        var beforeReplay: (() -> Unit)? = null
     }
 
     private val entries = mutableListOf<Entry>()
@@ -31,6 +32,29 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
         return delegate(method, arguments)
     }
 
+    @Suppress("UNCHECKED_CAST")
+    fun placeAlbumActions(
+        isDiscHeading: (Any?) -> Boolean,
+        decorate: @Composable (heading: @Composable () -> Unit) -> Unit,
+        append: () -> Unit
+    ) {
+        // A native composable can implement several JVM FunctionN interfaces.
+        val headingType = Function3::class.java as Class<@Composable (Any) -> Unit>
+        val index = entries.indexOfFirst {
+            it.args.size == 3 && headingType.isInstance(it.args[2]) && isDiscHeading(it.args[0])
+        }
+        if (index == -1) {
+            // A disc with no number has no visible heading. Keep its controls above the tracks.
+            val header = entries.indexOfFirst { it.args.size == 3 && it.args[0] == "header" }
+            entries.getOrNull(header + 1)?.beforeReplay = append
+            return
+        }
+        val entry = entries[index]
+        val original = headingType.cast(entry.args[2])
+        val heading: @Composable (Any) -> Unit = { scope -> decorate { original(scope) } }
+        entries[index] = Entry(entry.method, arrayOf(entry.args[0], entry.args[1], heading))
+    }
+
     fun apply(
         hideWholeTrack: Boolean,
         cues: Map<String, AlbumCue> = emptyMap(),
@@ -41,6 +65,7 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
         var wholeTrack: Entry? = null
         try {
             for (entry in entries) {
+                entry.beforeReplay?.invoke()
                 if (entry.footer && !appendCue(wholeTrack != null)) {
                     wholeTrack?.let { delegate(it.method, it.args) }
                 }
@@ -81,6 +106,7 @@ internal class AlbumListScope(private val original: Any) : InvocationHandler {
             val recordedIds = idsByEntry.flatten()
             val matched = expectedIds.distinct().size == expectedIds.size && recordedIds == expectedIds
             for ((index, entry) in entries.withIndex()) {
+                entry.beforeReplay?.invoke()
                 if (entry.footer && !matched) appendFallback()
                 val ids = idsByEntry[index].takeIf { matched }.orEmpty()
                 val shown = ids.indices.filter { ids[it] !in hiddenIds }

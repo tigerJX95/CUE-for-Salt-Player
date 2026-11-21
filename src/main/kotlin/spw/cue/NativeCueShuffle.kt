@@ -30,6 +30,7 @@ internal class NativeCueShuffle(
     private var appliedRevision = 0L
     private val parsed = CueDiscovery.ParsedCueCache()
     private val boundary = CueShuffleBoundary()
+    private val orderedBoundary = CueShuffleBoundary()
     private val hooks = mutableListOf<AutoCloseable>()
     private data class Pool(
         val queue: HostCueQueue.Snapshot, val entries: List<CueShuffleEntry>, val timelines: Map<Path, AlbumCue>
@@ -45,11 +46,23 @@ internal class NativeCueShuffle(
             val controller = HostCatalog.type("com.xuncorp.voxzen.service.PlaybackController")
             for ((name, direction) in listOf("previous" to -1, "next" to 1)) {
                 val method = controller.getMethod(name)
-                hooks += WorkshopApi.hookRegistrar.hookMethod(controller.name, name, emptyList(), 100) {
+                check(method.returnType == Void.TYPE)
+                hooks += WorkshopApi.hookRegistrar.hookMethod(controller.name, method.name, emptyList(), 100) {
                     before { call ->
                         try {
-                            if (bypass.get() == true || call.isOriginalSkipped || !active() || playbackMode() !in setOf("Random", "Circle", "CircleEnd")) return@before
-                            if (!randomMode() && !atSourceEdge(direction)) return@before
+                            if (bypass.get() == true || call.isOriginalSkipped || !active()) return@before
+                            val mode = playbackMode()
+                            if (mode != "Random" && !CueSongOrder.isOrdered(mode)) return@before
+                            val item = host.current.value
+                            val id = item?.let { host.id.invoke(it) as? String }
+                            val audio = item?.let { LibraryProbe.localPath(host.path.invoke(it) as? String) }
+                            if (CueSongOrder.step(mode, id, audio, direction, removed(), ::pause)) {
+                                pending = null
+                                call.setResult(null)
+                                return@before
+                            }
+                            if (isWholeFile(item)) return@before
+                            if (mode != "Random" && !atSourceEdge(direction)) return@before
                             if (EventQueue.isDispatchThread()) {
                                 if (request(direction)) call.setResult(null)
                             } else if (pool?.timelines?.isNotEmpty() == true) {
@@ -75,6 +88,18 @@ internal class NativeCueShuffle(
                         }
                     }
                 }
+            }
+            try {
+                hooks += HostPlaybackEnd.install(active, ::playbackMode, { mode ->
+                    orderedCursor(mode)?.let { advanceOrdered(it, mode, 1, atFileEnd = true) } == true ||
+                        CueAlbumSequence.advanceAtNativeEnd(mode) != null
+                }, { mode ->
+                    orderedCursor(mode) != null || CueAlbumSequence.hasNativeSuccessor(mode)
+                }, report)
+            } catch (error: Exception) {
+                report("自然跨碟入口未就绪：${error.cause?.message ?: error.message}")
+            } catch (error: LinkageError) {
+                report("自然跨碟入口签名不匹配：${error.javaClass.simpleName}")
             }
             scope.launch {
                 combine(queue.flow, revision) { state, rev ->
@@ -142,10 +167,15 @@ internal class NativeCueShuffle(
     }
     fun randomMode(): Boolean = playbackMode() == "Random"
 
-    fun ownsNaturalEnd(): Boolean = randomMode() ||
-        (playbackMode() in setOf("Circle", "CircleEnd") && pool?.let {
+    fun ownsOrderedNavigation(): Boolean = CueSongOrder.ownsNavigation(playbackMode())
+
+    fun ownsNaturalEnd(): Boolean = when (playbackMode()) {
+        "Random", "RepeatOne" -> true
+        "Circle", "CircleEnd" -> ownsOrderedNavigation() || pool?.let {
             it.timelines.isNotEmpty() && it.queue.items.size > 1 && queue.snapshot() == it.queue
-        } == true)
+        } == true
+        else -> false
+    }
 
     private fun atSourceEdge(direction: Int): Boolean {
         val data = pool ?: return false
@@ -187,15 +217,26 @@ internal class NativeCueShuffle(
     }
 
     private fun observe(item: Any?, progress: Any?) {
-        if (!active() || item == null || progress == null) {
+        if (!active() || item == null || progress == null || isWholeFile(item)) {
             boundary.reset()
+            orderedBoundary.reset()
             return
         }
-        val data = pool ?: return
         val audio = LibraryProbe.localPath(host.path.invoke(item) as? String)
-        val timeline = data.timelines[audio]
         val position = host.position.invoke(progress) as Long
         val duration = host.duration.invoke(progress) as Long
+        val mode = playbackMode()
+        val ordered = orderedCursor(mode, item, audio)
+        val window = ordered?.row?.cue?.let { CuePlaybackWindow.from(it, duration) }
+        if (ordered != null && window != null && window.endMs < duration) {
+            val ended = orderedBoundary.observe(ordered, listOf(checkNotNull(ordered.row.cue)), position, duration,
+                PlaybackProbe.lastSeek?.observedAt, PlaybackProbe.playing, speed = queue.speed())
+            if (ended != null) advanceOrdered(ordered, mode, 1, segmentEnded = true)
+            return
+        }
+        orderedBoundary.reset()
+        val data = pool ?: return
+        val timeline = data.timelines[audio]
         val actualTrack = cueTrackAt(timeline?.tracks.orEmpty(), position, duration)
         if (pending?.blocks(audio, actualTrack) == true) return
         pending = null
@@ -205,11 +246,27 @@ internal class NativeCueShuffle(
         if (ended != null) request(1, ended)
     }
 
+    private fun orderedCursor(
+        mode: String?, item: Any? = host.current.value,
+        audio: Path? = item?.let { LibraryProbe.localPath(host.path.invoke(it) as? String) }
+    ): CueSongOrder.Cursor? = item?.let { CueSongOrder.current(mode, host.id.invoke(it) as? String, audio) }
+
+    private fun isWholeFile(item: Any?): Boolean =
+        item != null && CueSongOrder.isWholeFile(host.id.invoke(item) as? String)
+
+    private fun advanceOrdered(
+        cursor: CueSongOrder.Cursor, mode: String?, direction: Int,
+        segmentEnded: Boolean = false, atFileEnd: Boolean = false
+    ): Boolean = CueSongOrder.advance(cursor, mode, direction, removed(), ::pause, segmentEnded, atFileEnd)
+
+    private fun pause() { WorkshopApi.playback.pause() }
+
     private fun request(direction: Int, ended: CueTrack? = null): Boolean {
         val data = pool?.takeIf { it.timelines.isNotEmpty() } ?: return false
         val mode = playbackMode()
         if (!active() || mode !in setOf("Random", "Circle", "CircleEnd") || queue.snapshot() != data.queue) return false
         val item = host.current.value ?: return false
+        if (isWholeFile(item)) return false
         val audio = LibraryProbe.localPath(host.path.invoke(item) as? String)
         val progress = host.progress.value ?: return false
         val actualTrack = data.timelines[audio]?.let {
@@ -251,6 +308,7 @@ internal class NativeCueShuffle(
             boundary.reset()
             pending = CuePendingTransition(target.audio, target.track, System.nanoTime() + TimeUnit.SECONDS.toNanos(5))
             queue.play(data.queue, target.sourceIndex, target.startMs, audio != null && audio == target.audio)
+            if (!sequential) CueSongOrder.clear()
             report("${if (sequential) "顺序衔接" else "随机播放"} · ${target.track?.title ?: "普通歌曲"}")
             return true
         } catch (error: Exception) {
@@ -268,6 +326,8 @@ internal class NativeCueShuffle(
         pool = null
         pending = null
         boundary.reset()
+        orderedBoundary.reset()
+        CueSongOrder.clear()
         history.clear()
     }
 }

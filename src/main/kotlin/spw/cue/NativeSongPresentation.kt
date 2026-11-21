@@ -2,16 +2,25 @@ package spw.cue
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.currentComposer
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
-import com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi
-import com.xuncorp.spw.workshop.api.WorkshopApi
+import java.lang.classfile.Instruction
 import java.lang.classfile.Opcode
+import java.lang.classfile.TypeKind
 import java.lang.classfile.constantpool.StringEntry
 import java.lang.classfile.instruction.ConstantInstruction.LoadConstantInstruction
+import java.lang.classfile.instruction.FieldInstruction
+import java.lang.classfile.instruction.LoadInstruction
+import java.lang.reflect.Constructor
+import java.lang.reflect.Field
 import java.lang.reflect.Method
 
 internal data class SongRowTheme(
@@ -84,28 +93,87 @@ internal fun nativeSongRowTheme(): SongRowTheme {
     return theme
 }
 
-private val suppressAlbumRowAccent = ThreadLocal<Boolean>()
+private class RowPaletteBinding(
+    val local: ProvidableCompositionLocal<Any>,
+    private val pair: Constructor<*>,
+    private val palettes: List<Method>,
+    private val palette: Constructor<*>,
+    private val shades: List<Field>,
+    private val accentIndex: Int,
+    private val textIndex: Int
+) {
+    fun shadesOf(source: Any): List<List<Long>> = palettes.map { getPalette ->
+        val colors = getPalette.invoke(source)
+        shades.map { field -> ((field.get(colors) as State<*>).value as Color).value.toLong() }
+    }
 
-@OptIn(UnstableSpwWorkshopApi::class)
-internal fun installAlbumRowAccentOverride(): AutoCloseable {
-    val binding = checkNotNull(songThemeBinding) { "未找到原生曲目行强调色" }
-    val accent = binding.accentColor
-    return WorkshopApi.hookRegistrar.hookMethod(accent.declaringClass.name, accent.name, emptyList(), 50) {
-        before { call ->
-            if (suppressAlbumRowAccent.get() != true || call.isOriginalSkipped) return@before
-            val colors = call.thisObject ?: return@before
-            val neutral = runCatching { binding.titleColor.invoke(colors) as Long }.getOrNull()
-            if (neutral != null) call.setResult(neutral)
+    fun withNeutralAccent(colors: List<List<Long>>): Any {
+        val replacements = colors.map { shades ->
+            val args = shades.toTypedArray()
+            args[accentIndex] = shades[textIndex]
+            palette.newInstance(*args)
         }
+        return pair.newInstance(*replacements.toTypedArray())
     }
 }
 
-internal fun withoutAlbumRowAccent(render: () -> Unit) {
-    val previous = suppressAlbumRowAccent.get()
-    suppressAlbumRowAccent.set(true)
-    try {
+private val rowPaletteBinding by lazy {
+    runCatching {
+        val theme = checkNotNull(songThemeBinding)
+        val calls = HostCatalog.calls(theme.colors)
+        val colorType = theme.colors.returnType
+        val getLocal = calls.filter {
+            it.opcode() == Opcode.INVOKESTATIC &&
+                it.type().stringValue() == "()Landroidx/compose/runtime/ProvidableCompositionLocal;"
+        }.map(HostCatalog::resolve).distinct().single()
+        val pairType = calls.filter {
+            it.opcode() == Opcode.INVOKEVIRTUAL && it.type().stringValue() == "()${colorType.descriptorString()}"
+        }.map { HostCatalog.type(it.owner().asInternalName()) }.distinct().single()
+        val pair = pairType.getConstructor(colorType, colorType)
+        val palettes = HostCatalog.accessors(pair)
+        val palette = colorType.declaredConstructors.single {
+            it.parameterCount > 0 && it.parameterTypes.all { type -> type == Long::class.javaPrimitiveType }
+        }
+        check(palette.trySetAccessible())
+        val owner = colorType.name.replace('.', '/')
+        // The palette stores one snapshot state per packed color constructor argument.
+        val names = HostCatalog.code(palette).filterIsInstance<Instruction>().windowed(6).mapNotNull { window ->
+            val receiver = window[0] as? LoadInstruction ?: return@mapNotNull null
+            val value = window[1] as? LoadInstruction ?: return@mapNotNull null
+            val field = window.last() as? FieldInstruction ?: return@mapNotNull null
+            if (receiver.slot() != 0 || value.typeKind() != TypeKind.LONG || field.opcode() != Opcode.PUTFIELD ||
+                field.owner().asInternalName() != owner ||
+                field.type().stringValue() != "Landroidx/compose/runtime/MutableState;") return@mapNotNull null
+            value.slot() to field.name().stringValue()
+        }.sortedBy { it.first }.also { fields ->
+            check(fields.map { it.first } == (1 until 2 * palette.parameterCount step 2).toList())
+        }.map { it.second }
+        val shades = names.map { name ->
+            colorType.getDeclaredField(name).also { check(it.trySetAccessible()) }
+        }
+        fun index(getter: Method): Int {
+            val name = HostCatalog.code(getter).filterIsInstance<FieldInstruction>().single {
+                it.opcode() == Opcode.GETFIELD && it.owner().asInternalName() == owner
+            }.name().stringValue()
+            return names.indexOf(name).also { check(it >= 0) }
+        }
+        @Suppress("UNCHECKED_CAST")
+        val local = getLocal.invoke(null) as ProvidableCompositionLocal<Any>
+        RowPaletteBinding(local, pair, palettes, palette, shades, index(theme.accentColor), index(theme.titleColor))
+    }.getOrNull()
+}
+
+internal fun nativeRowPaletteAvailable(): Boolean = rowPaletteBinding != null
+
+@Composable
+internal fun NeutralNativeRowAccent(suppress: Boolean, render: @Composable () -> Unit) {
+    val binding = rowPaletteBinding
+    if (suppress && binding != null) {
+        // A skipped primitive-return hook can leave transparent zero in the host.
+        val colors = binding.shadesOf(binding.local.current)
+        val palette = remember(binding, colors) { binding.withNeutralAccent(colors) }
+        CompositionLocalProvider(binding.local provides palette, content = render)
+    } else {
         render()
-    } finally {
-        if (previous == null) suppressAlbumRowAccent.remove() else suppressAlbumRowAccent.set(previous)
     }
 }

@@ -2,6 +2,20 @@
 
 [中文](CHANGELOG.md) | [English](CHANGELOG_EN.md)
 
+## v0.6.0 — 2026-11-19
+
+- **Shuffle individual CUE tracks.** In the host’s Random mode, CUE sheets in the current queue are expanded into individual candidates alongside regular songs. Finishing a CUE track or pressing Next no longer forces playback into the next segment of the same audio file.
+- **Preserve the playback scope.** When switching to an audio file already in the current queue, keep the complete queue rather than replacing it with one full-length file. Shuffle does not add songs from outside that queue.
+- **Continue after the full-length file.** Sequential playback continues to the song after the current CUE source. Preserve complete queues and repair a former one-file queue from the current page; match by audio path when a dragged item has a different library ID.
+- **Consecutive skip state.** Sequential and random transitions release their waiting state when the target is reached, so completed switches do not keep blocking skips until timeout. Disabling clears pending transition state.
+- **Batch restoration and status filters.** Check multiple tracks or all displayed results and restore them together. Combine title and artist search with Hidden or Removed filters.
+- **Multi-disc management and playback location.** Group entries by source audio without renumbering groups after filtering. The playing track is marked; Locate playback clears the filters and scrolls to it.
+- **Artwork on artist pages.** Fill in missing album covers for single- and multi-disc albums that use external CUE sheets.
+- **Songs in Artist Details.** Open an artist from their avatar and select Songs to see CUE tracks from single- and multi-disc albums. The song count follows the list, and CUE tracks can be played, selected, hidden, or removed.
+- **Restoration across discs.** While a multi-disc album is playing, the CUE window combines hidden and removed records for its discs. Tracks across discs can be selected and restored together.
+- **Windows taskbar progress.** The progress bar uses the start and duration of the current CUE track and resets at the start of the next track.
+- **Digital Disc integration.** With SPW Digital Disc v1.11.0 enabled, switching CUE tracks triggers the disc eject animation.
+
 ## v0.5.0 — 2026-11-18
 
 - **Playback highlighting.** Album Details and Songs use the accent color for the playing CUE track, following track and disc changes. Its original audio row uses the normal color while the CUE track is visible.
