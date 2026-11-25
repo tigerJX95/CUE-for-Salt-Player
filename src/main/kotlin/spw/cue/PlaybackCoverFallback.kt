@@ -3,111 +3,221 @@ package spw.cue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi
+import com.xuncorp.spw.workshop.api.WorkshopApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import java.awt.image.BufferedImage
+import java.nio.file.Path
 import java.lang.reflect.Modifier
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
+internal fun readPlaybackCover(
+    audio: Path, cache: FolderCover.DecodedCache? = null, libraryArtwork: () -> ByteArray? = { null }
+): BufferedImage? {
+    if (CueDiscovery.find(audio) == null) return null
+    return FolderCover.loadSong(audio, cache = cache) ?: libraryArtwork()?.let { FolderCover.decodeEmbedded(it, 512) }
+}
+
+@OptIn(UnstableSpwWorkshopApi::class)
 internal class PlaybackCoverFallback(
     private val active: () -> Boolean,
     private val report: (String) -> Unit
 ) : AutoCloseable {
     private val playback = HostCurrentPlayback()
     private val host = HostArtwork()
+    private val stopped = AtomicBoolean()
+    private val transition = PlaybackCoverTransition<BufferedImage>()
+    private val folderCovers = FolderCover.DecodedCache()
+    private val refresh = MutableStateFlow<Refresh?>(null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var published: Published? = null
+    private fun interceptNativeCover(nativeCover: Any?): Boolean {
+        if (!running()) return false
+        var skip = false
+        guarded {
+            val service = host.service()
+            synchronized(host.lock.get(service)) {
+                if (!running()) return@synchronized
+                if (nativeCover != null) {
+                    transition.nativePublished()
+                } else {
+                    val item = playback.current.value
+                    skip = transition.interceptMissing(item, audioOf(item) != null) { image ->
+                        publish(service, checkNotNull(item), image)
+                    }
+                }
+            }
+        }
+        return skip
+    }
+
+    private val monitorHook = try {
+        host.interceptMonitor(::interceptNativeCover)
+    } catch (failure: Exception) {
+        report("已订阅封面状态 · 切歌过渡接口不可用（${failure.javaClass.simpleName}）")
+        null
+    } catch (failure: LinkageError) {
+        report("已订阅封面状态 · 切歌过渡接口不兼容（${failure.javaClass.simpleName}）")
+        null
+    }
 
     init {
         scope.launch {
-            playback.current.collectLatest { item ->
+            host.events.collect { owner ->
+                if (owner == null && running()) guarded(::restoreAfterNativeClear)
+            }
+        }
+        scope.launch {
+            combine(playback.current, refresh) { item, request ->
+                item to request?.takeIf { it.item === item }
+            }.distinctUntilChanged().collectLatest { (item, request) ->
                 guarded {
-                    clearPublished()
-                    if (item != null && active()) {
-                        follow(item)
-                    } else if (active()) {
-                        report("没有播放项")
-                    }
+                    if (!running()) return@guarded
+                    if (item == null) clearPublished() else follow(item, refreshCover = request != null)
                 }
             }
         }
     }
 
-    private suspend fun follow(item: Any) {
-        val audio = LibraryProbe.localPath(playback.path.invoke(item) as? String)
-        if (audio == null) {
-            report("当前播放路径不可用")
-            return
+    fun refreshAlbum(trackIds: List<String>) {
+        if (trackIds.isEmpty()) return
+        val item = playback.current.value ?: return
+        scope.launch {
+            guarded {
+                if (!running() || playback.current.value !== item) return@guarded
+                val audio = audioOf(item) ?: return@guarded
+                val id = playback.id.invoke(item) as? String
+                val matches = id in trackIds || runInterruptible(Dispatchers.IO) {
+                    LibraryProbe.albumContainsAudio(trackIds, audio) { running() && playback.current.value === item }
+                }
+                if (matches && running() && playback.current.value === item) refresh.value = Refresh(item)
+            }
+        }
+    }
+
+    private fun running() = !stopped.get() && active()
+
+    private fun audioOf(item: Any?): Path? =
+        item?.let { LibraryProbe.localPath(playback.path.invoke(it) as? String) }
+
+    private fun restoreAfterNativeClear() {
+        val service = host.service()
+        synchronized(host.lock.get(service)) {
+            if (!running() || host.owner.get(service) != null || host.events.replayCache.lastOrNull() != null) return
+            val item = playback.current.value ?: return
+            transition.restoreAfterNativeClear(item) { publish(service, item, it) }
+        }
+    }
+
+    private suspend fun follow(item: Any, refreshCover: Boolean) {
+        val audio = audioOf(item)
+        report("正在查找当前音频的同目录封面")
+        val image = try {
+            audio?.let {
+                runInterruptible(Dispatchers.IO) {
+                    if (refreshCover) folderCovers.invalidateSong(it)
+                    readPlaybackCover(it, folderCovers) {
+                        val id = playback.id.invoke(item) as? String
+                        id?.takeIf(String::isNotBlank)?.let { trackId ->
+                            WorkshopApi.library.getCoverById(trackId).toCompletableFuture().get(5, TimeUnit.SECONDS)
+                        }
+                    }
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (refreshCover) {
+                if (playback.current.value === item) report("刷新播放封面失败：${error.javaClass.simpleName}")
+                return
+            }
+            null
+        } catch (error: LinkageError) {
+            if (refreshCover) {
+                if (playback.current.value === item) report("刷新播放封面接口不兼容：${error.javaClass.simpleName}")
+                return
+            }
+            null
         }
         val service = host.service()
-        val lock = host.lock.get(service)
-        var loaded = false
-        var image: BufferedImage? = null
-        report("正在检查播放器封面状态")
-
-        // Give the native loader its first opportunity, then react to its published image
-        // instead of depending on the completion callback of a particular suspend function.
-        delay(300)
-        host.events.onStart { emit(null) }.collect {
-            guarded {
-                if (!active() || playback.current.value !== item) return@guarded
-                val owner = synchronized(lock) { host.owner.get(service) }
-                if (owner != null) {
-                    report(if (published?.image === owner) "已补齐同目录封面" else "已保留播放器原生封面")
-                    return@guarded
-                }
-                if (!loaded) {
-                    report("原生封面缺失，正在查找同目录图片")
-                    image = runInterruptible(Dispatchers.IO) {
-                        if (CueDiscovery.find(audio) == null) null else FolderCover.load(audio)
-                    }
-                    loaded = true
-                }
-                val cover = image
-                if (cover == null) {
-                    report("当前音频没有匹配的 CUE 或同目录封面")
-                    return@guarded
-                }
-                synchronized(lock) {
-                    if (!active() || playback.current.value !== item || host.owner.get(service) != null) {
-                        return@synchronized
-                    }
-                    val fallback = host.createOwner(cover.toComposeImageBitmap())
-                    try {
-                        host.publish(service, fallback)
-                    } catch (error: Throwable) {
-                        try {
-                            host.publish(service, null)
-                        } finally {
-                            fallback.close()
-                        }
-                        throw error
-                    }
-                    published = Published(service, fallback)
-                    report("已补齐同目录封面")
-                }
+        synchronized(host.lock.get(service)) {
+            if (!running()) return
+            val owner = host.owner.get(service)
+            val fallback = ownedFallback(service, owner)
+            val replacingFallback = refreshCover && fallback != null
+            val keepOwner = owner != null && !replacingFallback
+            if (!transition.complete(item, playback.current.value, image, keepOwner, replacingFallback) {
+                    publish(service, item, it)
+                }) return
+            if (keepOwner) {
+                report(if (fallback != null) "已补齐播放封面" else "已保留播放器原生封面")
+            } else if (image == null) {
+                report(if (audio == null) "当前播放路径不可用" else "当前音频没有匹配的 CUE 或目录封面")
             }
         }
     }
 
-    private fun clearPublished() {
-        val previous = published ?: return
-        published = null
-        synchronized(host.lock.get(previous.service)) {
-            if (host.owner.get(previous.service) === previous.image) {
+    // Called under the cover lock. The native loader closes the old owner after its callback.
+    // A refresh that replaces a fallback still installed in the owner slot releases it here.
+    private fun publish(service: Any, item: Any, image: BufferedImage?) {
+        val fallback = image?.let { host.createOwner(it.toComposeImageBitmap()) }
+        if (!running() || playback.current.value !== item) {
+            fallback?.close()
+            return
+        }
+        val previous = ownedFallback(service, host.owner.get(service))
+        try {
+            host.publish(service, fallback)
+            published = fallback?.let { Published(service, it) }
+        } catch (error: Throwable) {
+            if (fallback != null) {
                 try {
-                    host.publish(previous.service, null)
+                    host.publish(service, null)
+                } finally {
+                    fallback.close()
+                }
+            }
+            throw error
+        } finally {
+            if (previous != null && host.owner.get(service) !== previous.image) {
+                if (published === previous) published = null
+                previous.image.close()
+            }
+        }
+        if (fallback != null) report("已补齐播放封面")
+    }
+
+    private fun ownedFallback(service: Any, owner: Any?): Published? =
+        published?.takeIf { it.service === service && it.image === owner }
+
+    private fun clearPublished() {
+        val service = host.service()
+        synchronized(host.lock.get(service)) {
+            if (!stopped.get() && playback.current.value != null) return
+            val deferred = transition.reset()
+            val previous = published
+            published = null
+            val owner = host.owner.get(service)
+            if (previous != null && previous.service === service && owner === previous.image) {
+                try {
+                    host.publish(service, null)
                 } finally {
                     previous.image.close()
                 }
+            } else if (deferred && owner == null) {
+                host.publish(service, null)
             }
         }
     }
@@ -125,12 +235,18 @@ internal class PlaybackCoverFallback(
     }
 
     override fun close() {
+        if (!stopped.compareAndSet(false, true)) return
         scope.cancel()
         // Serialize release with the host's playback-state changes.
-        CoroutineScope(Dispatchers.Main).launch { guarded(::clearPublished) }
+        try {
+            monitorHook?.close()
+        } finally {
+            CoroutineScope(Dispatchers.Main).launch { guarded(::clearPublished) }
+        }
     }
 
     private data class Published(val service: Any, val image: AutoCloseable)
+    private class Refresh(val item: Any)
 
     private class HostArtwork {
         private val playbackService = HostCatalog.type("com.xuncorp.voxzen.service.PlaybackService")
@@ -154,7 +270,17 @@ internal class PlaybackCoverFallback(
 
         init {
             check(AutoCloseable::class.java.isAssignableFrom(owner.type))
+            check(Modifier.isStatic(update.modifiers) && update.returnType == Void.TYPE)
         }
+
+        fun interceptMonitor(intercept: (Any?) -> Boolean): AutoCloseable =
+            WorkshopApi.hookRegistrar.hookMethod(
+                update.declaringClass.name, update.name, update.parameterTypes.map { it.name }, 50
+            ) {
+                before { call ->
+                    if (!call.isOriginalSkipped && intercept(call.args[1])) call.setResult(null)
+                }
+            }
 
         fun service(): Any = checkNotNull(serviceField.get(null))
 

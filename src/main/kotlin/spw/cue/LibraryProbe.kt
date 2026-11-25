@@ -101,26 +101,31 @@ internal object LibraryProbe {
         return ProbeResult(sheet, discs.associate { (item, audio, _) -> audio to item }, current())
     }
 
+    fun albumContainsAudio(trackIds: List<String>, audio: Path, active: () -> Boolean): Boolean =
+        albumTracks(trackIds.distinct(), active).any { pathOf(it) == audio }
+
     private fun resolveAlbumCues(trackIds: List<String>, active: () -> Boolean): List<Triple<MediaItem, Path, CueSheet>> {
         if (trackIds.isEmpty() || trackIds.toSet().size != trackIds.size) return emptyList()
 
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-        val sources = trackIds.mapNotNull { id ->
-            if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
-            val remaining = deadline - System.nanoTime()
-            check(remaining > 0) { "读取专辑整轨超时" }
-            val item = WorkshopApi.library.getTrackById(id)
-                .toCompletableFuture().get(remaining, TimeUnit.NANOSECONDS)
-                ?.takeIf { it.id == id } ?: return@mapNotNull null
-            val audio = pathOf(item) ?: return@mapNotNull null
-            item to audio
-        }
-        val uniqueSources = sources.distinctBy { it.second }
+        val uniqueSources = albumTracks(trackIds, active)
+            .mapNotNull { item -> pathOf(item)?.let { item to it } }.distinctBy { it.second }.toList()
         val matches = CueDiscovery.findAll(uniqueSources.map { it.second }, active = active)
         return uniqueSources.mapNotNull { (item, audio) ->
             val sheet = matches[audio]?.sheet ?: return@mapNotNull null
             val tracks = sheet.tracks.filter { it.audio == audio }
             if (tracks.isEmpty()) null else Triple(item, audio, sheet.copy(tracks = tracks))
+        }
+    }
+
+    private fun albumTracks(trackIds: List<String>, active: () -> Boolean): Sequence<MediaItem> = sequence {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        for (id in trackIds) {
+            if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
+            val remaining = deadline - System.nanoTime()
+            check(remaining > 0) { "读取专辑整轨超时" }
+            val item = WorkshopApi.library.getTrackById(id)
+                .toCompletableFuture().get(remaining, TimeUnit.NANOSECONDS)
+            if (item?.id == id) yield(item)
         }
     }
 

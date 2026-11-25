@@ -19,7 +19,6 @@ internal const val CUE_SONG_KEY_PREFIX = "spw.cue.support:songs:"
 internal class NativeSongSelection private constructor(
     val groupSetter: Method,
     private val scrollState: Method,
-    private val selectionMode: Method,
     private val selectedKeys: Method,
     private val setSelectedKeys: Method,
     private val popup: Method,
@@ -28,9 +27,7 @@ internal class NativeSongSelection private constructor(
     private val listOwner: Class<*>
 ) {
     fun state(selector: Any?): Any? = selector?.let { scrollState.invoke(it) }
-    fun selecting(state: Any): Boolean = selectionMode.invoke(state) == true
     fun keys(state: Any): Set<*> = selectedKeys.invoke(state) as Set<*>
-    fun checked(state: Any, key: String): Boolean = key in keys(state)
 
     fun toggle(state: Any, key: String) {
         val current = keys(state)
@@ -82,13 +79,6 @@ internal class NativeSongSelection private constructor(
                 }
             }
             val state = scroll.returnType
-            val mode = state.methods.single {
-                it.parameterCount == 0 && it.returnType == Boolean::class.javaPrimitiveType &&
-                    HostCatalog.calls(it).any { call ->
-                        call.owner().asInternalName() == "androidx/compose/runtime/State" &&
-                            call.name().stringValue() == "getValue"
-                    }
-            }
             val keys = state.methods.single { it.parameterCount == 0 && it.returnType == Set::class.java }
             val write = state.methods.single {
                 it.returnType == Void.TYPE && it.parameterTypes.toList() == listOf(Set::class.java)
@@ -110,7 +100,7 @@ internal class NativeSongSelection private constructor(
                 method.parameterCount == 0 && method.returnType == Void.TYPE &&
                     HostCatalog.code(method).filterIsInstance<Instruction>().any { it.opcode() == Opcode.ICONST_0 }
             }
-            NativeSongSelection(setter, scroll, mode, keys, write, popup, open, close, owner)
+            NativeSongSelection(setter, scroll, keys, write, popup, open, close, owner)
         }.getOrNull()
     }
 }

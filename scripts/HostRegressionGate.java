@@ -433,6 +433,114 @@ public class HostRegressionGate {
         return rows;
     }
 
+    static void verifyAlreadyLoadedSongs(Path folder,Object target,Object page,Object sort,Object firstDisc,Object store) throws Exception {
+        Path secondFolder=Files.createDirectory(folder.resolve("CD2"));
+        Path secondAudio=Files.write(secondFolder.resolve("album.wav"),new byte[]{0});
+        Files.copy(folder.resolve("album.cue"),secondFolder.resolve("album.cue"));
+        Object secondDisc=track(secondAudio,"second-disc");
+        Class<?> targetType=target.getClass(), pageType=page.getClass();
+        Method filter=targetType.getMethod("filterTracks",List.class,Object.class,boolean.class,String.class);
+        Object loaded=filter.invoke(target,List.of(firstDisc,secondDisc),sort,true,"");
+        Object searched=filter.invoke(target,List.of(firstDisc,secondDisc),sort,true,"missing");
+        Class<?> mutableFlow=type("kotlinx.coroutines.flow.MutableStateFlow");
+        Method set=mutableFlow.getMethod("setValue",Object.class),get=mutableFlow.getMethod("getValue");
+        Object flow=type("kotlinx.coroutines.flow.StateFlowKt").getMethod("MutableStateFlow",Object.class).invoke(null,searched);
+        set.invoke(field(page,"pageState"),flow);
+        Method adopt=pageType.getDeclaredMethod("adoptExistingSongState",mutableFlow,Object.class);
+        adopt.setAccessible(true);
+        Object latest=field(page,"latestInput");
+        adopt.invoke(page,flow,searched);
+        adopt.invoke(page,flow,loaded);
+        require(get.invoke(latest)==null,"An empty search or stale state must not seed Songs");
+        set.invoke(flow,loaded);
+        adopt.invoke(page,flow,loaded);
+        Object input=get.invoke(latest);
+        require(input!=null && field(input,"original")==loaded && field(input,"sort")==sort &&
+            Boolean.TRUE.equals(field(input,"grouped")) &&
+            new HashSet<>((List<?>)field(input,"entities")).equals(Set.of(firstDisc,secondDisc)),
+            "The already-loaded Songs list must retain its native sorting and original tracks");
+        for(String name:List.of("diagnosing","callbacksVerified")) {
+            Field flag=pageType.getDeclaredField(name);
+            flag.setAccessible(true);
+            flag.setBoolean(page,true);
+        }
+        Object mount=field(page,"mount");
+        Constructor<?> activation=get.invoke(mount).getClass().getDeclaredConstructor(boolean.class,long.class);
+        activation.setAccessible(true);
+        set.invoke(mount,activation.newInstance(true,1L));
+        Method mountCurrent=pageType.getDeclaredMethod("mountCurrent",mutableFlow,Object.class,input.getClass(),
+            boolean.class,Set.class,long.class);
+        mountCurrent.setAccessible(true);
+        mountCurrent.invoke(page,flow,loaded,input,false,Set.of(),0L);
+        Object projected=get.invoke(flow);
+        require(targetType.getMethod("count",Object.class).invoke(target,projected).equals(6),
+            "Both whole-disc files and four CUE tracks must be listed without another host filter callback");
+        Object groups=targetType.getMethod("groupEntities",Object.class).invoke(target,projected);
+        verifyListRows(hookRegistrar(Files.createDirectory(folder.resolve("already-loaded-song-plugins"))),
+            target,page,groups,6);
+        System.out.println("PASS already-loaded Songs expands two CUE discs without waiting for a filter callback");
+
+        List<?> keys=new ArrayList<>(((Map<?,?>)field(groups,"selectionEntries")).values());
+        Set<?> removed=Set.copyOf(keys.subList(0,2)), hidden=Set.copyOf(keys.subList(2,4));
+        store.getClass().getMethod("remove",Set.class).invoke(store,removed);
+        store.getClass().getMethod("hide",Set.class).invoke(store,hidden);
+        mountCurrent.invoke(page,flow,projected,input,false,new HashSet<>(keys),0L);
+        Object filtered=get.invoke(flow);
+        require(targetType.getMethod("count",Object.class).invoke(target,filtered).equals(2),
+            "Hidden and removed tracks must leave both WAV rows visible");
+        Object diagnostics=field(page,"diagnostics");
+        String report=(String)diagnostics.getClass().getMethod("report").invoke(diagnostics);
+        require(report.contains("已隐藏 2 条、已从曲库移除 2 条") && report.contains("可在「管理分轨」恢复"),
+            "Songs diagnostics must distinguish recognized but excluded tracks: "+report);
+        System.out.println("PASS Songs reports separate hide and removal counts with recovery guidance");
+    }
+
+    static void verifySongRowInput(Object song) throws Exception {
+        Object selection=song.getClass().getMethod("getSelection").invoke(song);
+        require(selection!=null,"Songs must keep native checkbox selection");
+        Class<?> stateType=((Method)field(selection,"scrollState")).getReturnType();
+        Class<?> lazy=type("androidx.compose.foundation.lazy.LazyListState");
+        Object state=stateType.getConstructor(lazy).newInstance(lazy.getConstructor(int.class,int.class).newInstance(0,0));
+        Method keyboard=Arrays.stream(stateType.getMethods())
+            .filter(method->method.getReturnType()==void.class && Arrays.equals(method.getParameterTypes(),new Class<?>[]{boolean.class}))
+            .findFirst().orElseThrow();
+        Method keys=selection.getClass().getMethod("keys",Object.class);
+        Method write=(Method)field(selection,"setSelectedKeys");
+        String cue="spw.cue.support:songs:3:wav:1", normal="ordinary";
+        Method rowInput=Arrays.stream(type("spw.cue.NativeSongCueKt").getDeclaredMethods())
+            .filter(method->method.getName().startsWith("cueSongRowInput")).findFirst().orElseThrow();
+        Class<?> modifier=type("androidx.compose.ui.Modifier"), f0=type("kotlin.jvm.functions.Function0");
+        Object base=modifier.getField("Companion").get(null);
+        Object interaction=type("androidx.compose.foundation.interaction.InteractionSourceKt")
+            .getMethod("MutableInteractionSource").invoke(null);
+        int[] plays={0};
+        Object play=callback(f0.getName(),unused->{ plays[0]++; return singleton("kotlin.Unit"); });
+        for (boolean keyboardUsed:List.of(false,true)) {
+            keyboard.invoke(state,keyboardUsed);
+            for (Set<String> selected:List.of(Set.of(normal),Set.of(normal,cue))) {
+                write.invoke(state,selected);
+                Object input=rowInput.invoke(null,base,selected.contains(cue),0L,interaction,true,play);
+                Object gesture=modifier.getMethod("foldIn",Object.class,type("kotlin.jvm.functions.Function2"))
+                    .invoke(input,null,callback("kotlin.jvm.functions.Function2",args->
+                        args[1].getClass().getSimpleName().equals("CombinedClickableElement") ? args[1] : args[0]));
+                require(gesture!=null,"CUE song body must distinguish single and double clicks");
+                int before=plays[0];
+                for(String action:List.of("onClick","onDoubleClick")) {
+                    f0.getMethod("invoke").invoke(field(gesture,action));
+                }
+                require(plays[0]==before+2 && keys.invoke(selection,state).equals(selected),
+                    "Both body gestures must play even with native keyboard navigation or existing checkmarks");
+            }
+        }
+        Method toggle=selection.getClass().getMethod("toggle",Object.class,String.class);
+        toggle.invoke(selection,state,cue);
+        require(keys.invoke(selection,state).equals(Set.of(normal)),"Checkbox must preserve the normal song selection");
+        toggle.invoke(selection,state,cue);
+        require(keys.invoke(selection,state).equals(Set.of(normal,cue)),"Checkbox must still add the CUE track");
+        require(plays[0]==8,"Checkbox selection must never request playback");
+        System.out.println("PASS CUE single and double clicks play independently of native keyboard and checkbox selection");
+    }
+
     static void verifyWholeWaveCoverRows(Path folder,Object target,Object page,List<?> originals,Object source)
         throws Exception {
         Object hooks=hookRegistrar(folder);
@@ -691,6 +799,12 @@ public class HostRegressionGate {
             require(album.getClass().getMethod("getPlayback").invoke(album)!=null,"Album playback binding missing");
             Object cover=album.getClass().getMethod("getCover").invoke(album);
             Method image=(Method)cover.getClass().getMethod("getRender").invoke(cover);
+            Class<?> coverOwner=type("com.xuncorp.voxzen.service.PlaybackService").getDeclaredField("imageBitmapOwner").getType();
+            Class<?> playbackMonitor=type("com.xuncorp.voxzen.service.PlaybackMonitor");
+            Method publishCover=type(playbackMonitor.getName()+"Kt").getMethod("updateImageBitmap",playbackMonitor,coverOwner);
+            require(publishCover.getReturnType()==void.class,"Cover transition needs the native void publication point");
+            verifyHookRegistration(catalog,publishCover);
+            System.out.println("PASS playback cover notification accepts the Workshop hook");
             for(String name:List.of("gridCaller","artistCaller","songCaller")) {
                 String caller=(String)field(cover,name);
                 require(caller!=null,"Missing cover caller: "+name);
@@ -700,6 +814,7 @@ public class HostRegressionGate {
             Object song=resolve("spw.cue.SongHookTarget");
             Method nativeList=(Method)song.getClass().getMethod("getNativeList").invoke(song);
             verifySongsLocate(catalog,nativeList);
+            verifySongRowInput(song);
             Object companion=type("spw.cue.ArtistSongTarget").getField("Companion").get(null);
             Object artist=companion.getClass().getMethod("resolve",Method.class).invoke(companion,nativeList);
             require(artist!=null,"Artist Songs binding missing");
@@ -773,6 +888,12 @@ public class HostRegressionGate {
                 wholeSongThroughHostFrame(Files.createDirectory(folder.resolve("whole-song-plugins")),song,page,source,originals);
                 Constructor<?> songState=(Constructor<?>)field(song,"songState");
                 Object sort=songState.getParameterTypes()[3].getEnumConstants()[0];
+                Object lateStore=type("spw.cue.SongVisibility").getConstructor(Path.class)
+                    .newInstance(folder.resolve("late-song-visibility").resolve("song-visibility.txt"));
+                Object latePage=ctor.newInstance(song,function("kotlin.jvm.functions.Function0",false),
+                    function("kotlin.jvm.functions.Function0",true),type("spw.cue.SongPageDiagnostics").getConstructor().newInstance(),
+                    lateStore,function("kotlin.jvm.functions.Function2",null));
+                verifyAlreadyLoadedSongs(folder,song,latePage,sort,source,lateStore);
                 Object grouped=song.getClass().getMethod("filterTracks",List.class,Object.class,boolean.class,String.class)
                     .invoke(song,List.of(source,normal),sort,false,"");
                 List<?> artistGroups=(List<?>)song.getClass().getMethod("groupEntities",Object.class).invoke(song,grouped);

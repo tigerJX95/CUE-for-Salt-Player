@@ -5,7 +5,7 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.compose' version '2.4.20'
 }
 
-def releasedVersion = '0.7.0'
+def releasedVersion = '0.8.0'
 version = providers.gradleProperty('previewVersion').getOrElse(releasedVersion)
 
 java {

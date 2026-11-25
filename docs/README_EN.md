@@ -4,17 +4,14 @@
 
 A desktop Salt Player plugin for external CUE sheets and CUE data embedded in FLAC files. Browse, search, and play individual tracks in Album Details and Songs.
 
-**Current version v0.7.0 · 2026-11-20**
+**Current version v0.8.0 · 2026-11-25**
 
-- **Follow the Songs list order.** Sequential playback and list loop follow the sort order and search results in use when playback starts. Automatic transitions and Previous/Next follow that order across regular songs, full-length audio, and individual CUE tracks.
-- **Continue across discs in Album Details.** Sequential playback and list loop follow the album’s disc and track order. The last CUE track on CD1 can continue into the first playable CUE track on CD2.
-- **Album-wide CUE actions.** Refresh CUE and Manage tracks appear to the right of the first visible disc heading and apply to the entire album.
-- **Play full-length audio from Songs.** Selecting the original row plays the entire audio file. Its title remains visible, and the accent color follows the actual CUE track during CUE playback.
-- **Artwork for full-length WAV files in Songs.** Fixes the default placeholder on full-length WAV rows with a matching external CUE sheet. Visible full-length rows can display folder artwork with or without individual CUE tracks shown.
-- **Locate playback and keep Songs steady.** Locate Current Song finds the playing CUE track or its full-length audio by row key and keeps the scroll position when the row is already fully visible. Songs retains the current results and loaded artwork during equivalent host refreshes to prevent flicker or jumping to the end of the list.
-- **Search Artist Details.** The Songs tab finds CUE tracks alongside regular songs and applies existing hidden and removed records.
-- **Play across files in the CUE window.** Select a track in another library-matched audio file from the same CUE sheet or multi-disc album.
-- **Hover stability.** The Songs locate hint and seek preview are rendered within the page to avoid pointer events going to a separate hover layer during navigation.
+- **Play or select a CUE track.** After adding CUE audio to a library that already has regular songs, click or double-click the body of a CUE row to play it. Use the checkbox or Ctrl+A for multiple selection.
+- **Playback artwork transitions.** The playback controls and now-playing view transition directly to the folder cover. During rapid track changes, only the current track’s artwork is applied. The default music note appears when no artwork is available.
+- **Shared artwork for multi-disc albums.** Disc folders such as CD1 and CD2 can share a cover in the album folder. The playback controls, lyrics view, and Digital Disc view can use this cover.
+- **Reuse and refresh playback artwork.** Track changes reuse unchanged folder covers. Choose **Refresh CUE** while playing an album to reload its playback cover immediately.
+- **Songs page at startup.** When Salt Player already has a song list, the plugin uses it to identify and display CUE tracks.
+- **Track visibility diagnostics.** The Songs diagnostics report separate counts for hidden and removed tracks. If all recognized playable tracks are excluded, the report points to **Manage tracks** to restore them.
 
 [Version history](CHANGELOG_EN.md)
 
@@ -47,7 +44,7 @@ A CD rip can be stored as one audio file, with its track titles and start positi
 
 The accent color follows CUE track changes and disc transitions in Album Details and Songs. Pausing keeps the current track highlighted. When the current CUE track is visible, its full-length audio entry uses the normal text color.
 
-After editing a title, artist, track count, or timestamp, choose **Refresh CUE** beside the first disc heading in Album Details or in the Manage tracks window. This forces a re-read even when an editor preserves the CUE file’s size and modification time. Existing entries from other albums are reused. An audio file’s original entry is restored if its CUE match is lost. The current playback file’s CUE data is also re-read to update its title, artist, and track time range.
+After editing a title, artist, track count, timestamp, or album cover, choose **Refresh CUE** beside the first disc heading in Album Details or in the Manage tracks window. This forces a re-read even when an editor preserves the CUE file’s size and modification time. Existing entries from other albums are reused. An audio file’s original entry is restored if its CUE match is lost. If that album is playing, its title, artist, track time range, and folder cover are reloaded.
 
 ### Shuffle and playback scope
 
@@ -109,6 +106,8 @@ If Salt Player has no native cover, the plugin checks these filenames in order a
 
 For full-length WAV entries in Songs, the plugin checks the audio folder for artwork first. If there is no usable cover and the file is in a disc folder such as `CD1` or `CD2`, it looks in the parent folder for shared artwork.
 
+The shared cover in the album folder is also available during playback. Salt Player’s own artwork takes precedence, with folder artwork filling in when it is unavailable.
+
 For example, put the audio and CUE sheet for disc 1 in `Album/CD1/` and those for disc 2 in `Album/CD2/`. Salt Player must group both discs under the same album. A single CUE sheet with multiple `FILE` entries for audio files in the same folder also works.
 
 ## Settings
@@ -120,12 +119,11 @@ For example, put the audio and CUE sheet for disc 1 in `Album/CD1/` and those fo
 
 ## Compatibility
 
-| Platform | Distribution channel | Salt Player version | v0.7.0 verification |
+| Platform | Distribution channel | Salt Player version | v0.8.0 verification |
 | --- | --- | --- | --- |
-| Windows | Microsoft Store | 1.19.3 | Host regression passed |
-| Windows | Steam | 1.19.3 | Desktop test passed before the album action layout change |
-
-Desktop testing on Linux (Ubuntu 26.04.1 LTS), Steam channel, was completed for v0.6.0.
+| Windows | Microsoft Store | 1.19.3 | Desktop test passed |
+| Windows | Steam | 1.19.3 | Desktop test passed |
+| Linux (Ubuntu 26.04.1 LTS) | Steam | 1.19.3 | Desktop test passed |
 
 ## Diagnostics and limitations
 
@@ -143,7 +141,7 @@ Use **JDK 25**. The Gradle Wrapper uses **Gradle 9.8.0**. Run the appropriate co
 | Windows | `build.cmd` |
 | Linux | `bash gradlew clean test plugin` |
 
-The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.7.0.spmod`.
+The `.spmod` file is generated in `build/libs/CUE_for_Salt_Player_v0.8.0.spmod`.
 
 Licensed under the [MIT License](../LICENSE).
 

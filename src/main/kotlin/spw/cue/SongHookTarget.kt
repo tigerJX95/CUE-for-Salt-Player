@@ -85,6 +85,16 @@ internal class SongHookTarget private constructor(
 
     fun count(state: Any): Int = stateAccessors[2].invoke(state) as Int
 
+    data class LoadedSongs(val tracks: List<Any>, val sort: Any, val descending: Boolean)
+
+    fun loadedUnfilteredSongs(state: Any): LoadedSongs? {
+        if (!songState.declaringClass.isInstance(state) || stateAccessors[1].invoke(state) == true) return null
+        val groups = groupEntities(state)
+        val tracks = groups.filterNotNull().flatMap { tracksIn(it).filterNotNull() }
+        if (tracks.size != count(state) || tracks.isEmpty()) return null
+        return LoadedSongs(tracks, stateAccessors[3].invoke(state), stateAccessors[4].invoke(state) as Boolean)
+    }
+
     fun projection(original: Any, groups: List<Any>, count: Int): Any {
         check(songState.declaringClass.isInstance(original) && count >= 0)
         val args = stateAccessors.map { it.invoke(original) }.toTypedArray()

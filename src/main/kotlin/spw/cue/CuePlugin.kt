@@ -44,7 +44,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
     private var albumCoverHook: AutoCloseable? = null
     private var gridCoverHook: AutoCloseable? = null
     private var artistCoverHook: AutoCloseable? = null
-    private var playbackCover: AutoCloseable? = null
+    private var playbackCover: PlaybackCoverFallback? = null
     private var songCoverHook: AutoCloseable? = null
     private var songPageHook: AutoCloseable? = null
     private var songPage: NativeSongCue? = null
@@ -258,7 +258,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                     } catch (_: Exception) {
                         null
                     } else null
-                    val (hide, show) = try {
+                    val options = try {
                         runInterruptible {
                             helper.reload()
                             helper.get("hideWholeTrack", false) to helper.get("showCueSongs", true)
@@ -266,20 +266,22 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
                     } catch (error: CancellationException) {
                         throw error
                     } catch (_: Exception) {
-                        false to false
+                        null
                     }
                     val initialize = initial
                     initial = false
                     dispatch(session) {
-                        hideWholeTrack.value = hide
-                        showCueSongs.value = show
+                        options?.let { (hide, show) ->
+                            hideWholeTrack.value = hide
+                            showCueSongs.value = show
+                        }
                         if (initialize) {
                             songVisibility = visibility
                             CueRemoval.bind(visibility)
                             session.configReady = true
                             prepareNativeUi(session)
-                        } else {
-                            songPage?.setAutomatic(show)
+                        } else if (options != null) {
+                            songPage?.setAutomatic(showCueSongs.value)
                         }
                     }
                 }
@@ -499,6 +501,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         session.albumRefresh.request(ids)
         songPage?.refreshAlbum(ids)
         miniPlayerCue?.refreshCue()
+        playbackCover?.refreshAlbum(ids)
     }
 
     private fun showAlbumWindow(session: Session, ids: List<String>) {

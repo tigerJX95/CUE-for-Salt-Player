@@ -10,6 +10,7 @@ internal class SongPageDiagnostics {
     private var listEntries = 0L
     private var filter = "等待歌曲页原生筛选"
     private var scan = "等待原生曲库输入"
+    private var playable = 0
     private var preview = "尚未计算"
     private var publish = "尚未挂载"
     private var list = "等待歌曲页列表回调"
@@ -55,7 +56,8 @@ internal class SongPageDiagnostics {
             else -> "本次回调"
         }
         filter = "$source · 输入 $input 首 · 原生返回 $count 首 · ${if (query) "正在搜索" else "无搜索条件"} · ${if (hide) "隐藏整轨" else "保留整轨"}"
-        scan = "正在查找外置 CUE"
+        playable = 0
+        scan = "正在查找外置或内嵌 CUE"
         canMount = false
         preview = "尚未计算"
         publish = "尚未挂载"
@@ -64,12 +66,23 @@ internal class SongPageDiagnostics {
 
     @Synchronized
     fun scanned(paths: Int, sources: Int, tracks: Int, usable: Int) {
+        playable = usable
         scan = "本地路径 $paths 个 · 匹配整轨 $sources 首 · 解析分轨 $tracks 条 · 可点播 $usable 条"
     }
 
     @Synchronized
-    fun preview(count: Int, cues: Int) {
-        preview = "$count 首，其中分轨 $cues 条"
+    fun preview(count: Int, cues: Int, hidden: Int, removed: Int, searching: Boolean) {
+        preview = buildString {
+            append("$count 首，其中分轨 $cues 条")
+            if (hidden + removed > 0) {
+                append(if (searching) " · 搜索前" else " · ")
+                append("已隐藏 $hidden 条、已从曲库移除 $removed 条")
+            }
+            if (cues == 0 && playable > 0) {
+                if (hidden + removed == playable) append(" · 可点播分轨均已隐藏或移除，可在「管理分轨」恢复")
+                else if (searching) append(" · 当前搜索未找到可显示的分轨")
+            }
+        }
         canMount = cues > 0
     }
 

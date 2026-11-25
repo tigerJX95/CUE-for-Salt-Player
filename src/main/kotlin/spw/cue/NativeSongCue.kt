@@ -3,7 +3,7 @@ package spw.cue
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -432,6 +432,7 @@ internal class NativeSongCue(
         }
         previewScope.launch { watchMount() }
         previewScope.launch { watchAutomatic() }
+        previewScope.launch { watchExistingSongState() }
         return AutoCloseable {
             runCatching { artist?.close() }
             locateBinding = null
@@ -673,6 +674,28 @@ internal class NativeSongCue(
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun watchExistingSongState() {
+        pageState.filterNotNull().flatMapLatest { flow -> flow.map { state -> flow to state } }
+            .collect { (flow, state) -> adoptExistingSongState(flow, state) }
+    }
+
+    private fun adoptExistingSongState(flow: MutableStateFlow<Any>, state: Any) {
+        if (!active() || latestInput.value != null) return
+        try {
+            val loaded = target.loadedUnfilteredSongs(state) ?: return
+            synchronized(publishLock) {
+                if (!active() || pageState.value !== flow || flow.value !== state || latestInput.value != null) return
+                observedGroups = WeakReference(target.groupEntities(state))
+                latestInput.value = FilterInput(loaded.tracks, state, loaded.sort, loaded.descending, "")
+            }
+        } catch (error: Exception) {
+            diagnostics.failed("接手已有歌曲列表", error)
+        } catch (error: LinkageError) {
+            diagnostics.failed("接手已有歌曲列表", error)
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun watchMount() {
         mount.flatMapLatest { request ->
             if (!request.enabled) emptyFlow() else pageState.filterNotNull().flatMapLatest { flow ->
@@ -805,11 +828,21 @@ internal class NativeSongCue(
             diagnostics.scanned(library.catalogue.all.size, library.matchedSources, library.matchedTracks, library.songs.size)
             if (!active()) return null
             if (library.songs.isEmpty()) return input.original.takeIf { ownsState }
+            val removedKeys = visibility?.recovery?.value?.removedFromLibrary.orEmpty()
+            var hidden = 0
+            var removed = 0
             val expanded = buildList {
                 for (entity in entities.filterNotNull()) {
                     val split = library.sources[entity]
                     if (!hide || split == null) add(entity)
-                    split?.forEach { if (it.song.visibilityKey !in excluded) add(it.entity) }
+                    split?.forEach { track ->
+                        val key = track.song.visibilityKey
+                        when {
+                            key !in excluded -> add(track.entity)
+                            key in removedKeys -> removed++
+                            else -> hidden++
+                        }
+                    }
                 }
             }
             callbackCheck.set(CallbackCheck())
@@ -823,7 +856,7 @@ internal class NativeSongCue(
             val rows = groups.entries.sumOf { it.rows.size }
             check(count == rows) { "歌曲页原生计数与列表计划不一致（$count / $rows）" }
             val cueCount = groups.entries.sumOf { group -> group.rows.count { it is RowPlan.Cue } }
-            diagnostics.preview(count, cueCount)
+            diagnostics.preview(count, cueCount, hidden, removed, input.query.isNotBlank())
             if (apply && mount.value.enabled && callbacksVerified && active() && latestInput.value === input) {
                 target.projection(preview, groups, count)
             } else null
@@ -1262,63 +1295,56 @@ internal class NativeSongCue(
         val theme = if (playing) hostTheme.copy(titleColor = accent, detailColor = accent) else hostTheme
         val gap = theme.gap.dp
         val canSelect = selection != null && selectionState != null
-        val selecting = canSelect && selection.selecting(selectionState)
-        val checked = canSelect && selection.checked(selectionState, song.key)
-        val showSelection = selecting || checked
+        val selectedKeys = if (canSelect) selection.keys(selectionState) else emptySet<Any>()
+        val checked = song.key in selectedKeys
         val hoverSource = remember(song.key) { MutableInteractionSource() }
         val hovered by hoverSource.collectIsHoveredAsState()
         val selectionColor = theme.accentColor?.let { Color(it.toULong()) } ?: Color(0xFF42BFF5)
-        val selectionStyle = if (showSelection) {
-            Modifier.semantics { selected = checked }
-                .background(if (checked) selectionColor.copy(alpha = 0.25f) else Color.Transparent)
-        } else Modifier
+        val play: () -> Unit = {
+            if (active() && !seeking) {
+                seeking = true
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            val context = currentCoroutineContext()
+                            seekLock.withLock {
+                                LibraryProbe.playAlbumTrack(song.track, song.fileDuration, { active() && context.isActive }) { at, change ->
+                                    val index = groups.playbackRows.indexOfFirst { it.cue === song.track }
+                                    val fromSongs = !groups.artistPage && index >= 0
+                                    if (fromSongs) {
+                                        val ordered = CueSongOrder.isOrdered(target.playback.playbackMode())
+                                        CueAlbumSequence.clear()
+                                        CueSongOrder.start(groups.playbackRows, index, active, replaceQueue = ordered,
+                                            switchSource = ordered || change, play = playVisibleSong(groups))
+                                    } else {
+                                        CueAlbumSequence.clear()
+                                        CueSongOrder.clear()
+                                        target.playback.playAt(song.source, at, change, groups.playbackTracks)
+                                    }
+                                }
+                            }
+                        }
+                        diagnostics.playback = "已请求第 ${song.track.number} 轨 · ${formatCueTime(song.track.startMs)}"
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        diagnostics.failed("分轨点播", error)
+                        if (active()) WorkshopApi.ui.toast(error.cause?.message ?: error.message ?: "分轨定位失败",
+                            WorkshopApi.Ui.ToastType.Warning)
+                    } finally {
+                        seeking = false
+                    }
+                }
+            }
+        }
         Row(
             Modifier.fillMaxWidth().onSizeChanged { size ->
                 if (size.width > 0 && size.height > 0) {
                     diagnostics.laidOutCue(song.track.number, song.track.title, size.height)
                 }
             }.hoverable(hoverSource, enabled = canSelect)
-                .then(selectionStyle).clickable(enabled = showSelection || !seeking) {
-                if (canSelect && showSelection) {
-                    selection.toggle(selectionState, song.key)
-                    return@clickable
-                }
-                if (active() && !seeking) {
-                    seeking = true
-                    scope.launch {
-                        try {
-                            withContext(Dispatchers.IO) {
-                                val context = currentCoroutineContext()
-                                seekLock.withLock {
-                                    LibraryProbe.playAlbumTrack(song.track, song.fileDuration, { active() && context.isActive }) { at, change ->
-                                        val index = groups.playbackRows.indexOfFirst { it.cue === song.track }
-                                        val fromSongs = !groups.artistPage && index >= 0
-                                        if (fromSongs) {
-                                            val ordered = CueSongOrder.isOrdered(target.playback.playbackMode())
-                                            CueAlbumSequence.clear()
-                                            CueSongOrder.start(groups.playbackRows, index, active, replaceQueue = ordered,
-                                                switchSource = ordered || change, play = playVisibleSong(groups))
-                                        } else {
-                                            CueAlbumSequence.clear()
-                                            CueSongOrder.clear()
-                                            target.playback.playAt(song.source, at, change, groups.playbackTracks)
-                                        }
-                                    }
-                                }
-                            }
-                            diagnostics.playback = "已请求第 ${song.track.number} 轨 · ${formatCueTime(song.track.startMs)}"
-                        } catch (error: CancellationException) {
-                            throw error
-                        } catch (error: Exception) {
-                            diagnostics.failed("分轨点播", error)
-                            if (active()) WorkshopApi.ui.toast(error.cause?.message ?: error.message ?: "分轨定位失败",
-                                WorkshopApi.Ui.ToastType.Warning)
-                        } finally {
-                            seeking = false
-                        }
-                    }
-                }
-            }.padding(horizontal = gap, vertical = gap * 0.5f + 1.dp),
+                .cueSongRowInput(checked, selectionColor, hoverSource, enabled = !seeking, play = play)
+                .padding(horizontal = gap, vertical = gap * 0.5f + 1.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             SongCover(song.artwork)
@@ -1344,7 +1370,7 @@ internal class NativeSongCue(
                     // The native 20 dp button is inset 22 dp from the end of the whole row.
                     val offset = gap * 2 - 32.dp
                     SelectionIndicator(
-                        checked, showSelection || hovered, selectionColor, theme.detailColor,
+                        checked, selectedKeys.isNotEmpty() || hovered, selectionColor, theme.detailColor,
                         Modifier.offset(x = offset)
                     ) {
                         if (active()) selection.toggle(selectionState, song.key)
@@ -1399,3 +1425,12 @@ internal class NativeSongCue(
     }
 }
 
+
+internal fun Modifier.cueSongRowInput(
+    checked: Boolean, selectionColor: Color, interactionSource: MutableInteractionSource, enabled: Boolean, play: () -> Unit
+): Modifier {
+    val styled = if (checked) semantics { selected = true }.background(selectionColor.copy(alpha = 0.25f)) else this
+    // Native keyboard navigation and existing checkboxes never change the song body's action.
+    return styled.combinedClickable(enabled = enabled, role = Role.Button, interactionSource = interactionSource,
+        onClick = play, onDoubleClick = play)
+}
