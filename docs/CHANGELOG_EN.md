@@ -2,6 +2,18 @@
 
 [中文](CHANGELOG.md) | [English](CHANGELOG_EN.md)
 
+## v0.7.0 — 2026-11-20
+
+- **Follow the Songs list order.** Sequential playback and list loop follow the sort order and search results in use when playback starts. Automatic transitions and Previous/Next follow that order across regular songs, full-length audio, and individual CUE tracks.
+- **Continue across discs in Album Details.** Sequential playback and list loop follow the album’s disc and track order. The last CUE track on CD1 can continue into the first playable CUE track on CD2.
+- **Album-wide CUE actions.** Refresh CUE and Manage tracks appear to the right of the first visible disc heading and apply to the entire album.
+- **Play full-length audio from Songs.** Selecting the original row plays the entire audio file. Its title remains visible, and the accent color follows the actual CUE track during CUE playback.
+- **Artwork for full-length WAV files in Songs.** Fixes the default placeholder on full-length WAV rows with a matching external CUE sheet. Visible full-length rows can display folder artwork with or without individual CUE tracks shown.
+- **Locate playback and keep Songs steady.** Locate Current Song finds the playing CUE track or its full-length audio by row key and keeps the scroll position when the row is already fully visible. Songs retains the current results and loaded artwork during equivalent host refreshes to prevent flicker or jumping to the end of the list.
+- **Search Artist Details.** The Songs tab finds CUE tracks alongside regular songs and applies existing hidden and removed records.
+- **Play across files in the CUE window.** Select a track in another library-matched audio file from the same CUE sheet or multi-disc album.
+- **Hover stability.** The Songs locate hint and seek preview are rendered within the page to avoid pointer events going to a separate hover layer during navigation.
+
 ## v0.6.0 — 2026-11-19
 
 - **Shuffle individual CUE tracks.** In the host’s Random mode, CUE sheets in the current queue are expanded into individual candidates alongside regular songs. Finishing a CUE track or pressing Next no longer forces playback into the next segment of the same audio file.
