@@ -50,6 +50,18 @@ class CueParserTest {
         assertEquals("客席", parse(single).tracks[1].performer)
     }
 
+    @Test fun wholeFileArtistUsesAlbumCreditsAndKeepsExplicitTrackArtists() {
+        val sheet = parse(single)
+        assertEquals("专辑艺术家", sheet.wholeFileArtistFallback("", " 专辑艺术家 "))
+        assertEquals("测试艺术家", sheet.wholeFileArtistFallback("未知艺术家", "Unknown Artist"))
+        assertNull(sheet.wholeFileArtistFallback("已有艺术家", "专辑艺术家"))
+        assertEquals("客席", sheet.tracks[1].performer)
+
+        val guestOnly = parse(single.removePrefix("PERFORMER \"测试艺术家\"\n"))
+        assertEquals("客席", guestOnly.tracks[1].performer)
+        assertNull(guestOnly.wholeFileArtistFallback("", "未知藝術家"))
+    }
+
     @Test fun playbackTrackChangesAtCueBoundaryAndWhenSeekingBackward() {
         val tracks = parse(single).tracks
         assertEquals(tracks[0], cueTrackAt(tracks, 8_012, 24_000))

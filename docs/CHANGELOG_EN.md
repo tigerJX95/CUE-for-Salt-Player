@@ -2,6 +2,15 @@
 
 [中文](CHANGELOG.md) | [English](CHANGELOG_EN.md)
 
+## v0.8.0 — 2026-11-25
+
+- **Play or select a CUE track.** After adding CUE audio to a library that already has regular songs, click or double-click the body of a CUE row to play it. Use the checkbox or Ctrl+A for multiple selection.
+- **Playback artwork transitions.** The playback controls and now-playing view transition directly to the folder cover. During rapid track changes, only the current track’s artwork is applied. The default music note appears when no artwork is available.
+- **Shared artwork for multi-disc albums.** Disc folders such as CD1 and CD2 can share a cover in the album folder. The playback controls, lyrics view, and Digital Disc view can use this cover.
+- **Reuse and refresh playback artwork.** Track changes reuse unchanged folder covers. Choose **Refresh CUE** while playing an album to reload its playback cover immediately.
+- **Songs page at startup.** When Salt Player already has a song list, the plugin uses it to identify and display CUE tracks.
+- **Track visibility diagnostics.** The Songs diagnostics report separate counts for hidden and removed tracks. If all recognized playable tracks are excluded, the report points to **Manage tracks** to restore them.
+
 ## v0.7.0 — 2026-11-20
 
 - **Follow the Songs list order.** Sequential playback and list loop follow the sort order and search results in use when playback starts. Automatic transitions and Previous/Next follow that order across regular songs, full-length audio, and individual CUE tracks.

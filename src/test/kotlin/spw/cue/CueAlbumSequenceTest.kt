@@ -108,6 +108,18 @@ class CueAlbumSequenceTest {
         assertEquals(Triple("cd2", 7_000L, true), requests.last())
     }
 
+    @Test fun crossesDiscsInBothDirectionsWhenTheBoundaryTracksWereRemoved() {
+        val visibility = SongVisibility(temp.root.toPath().resolve("visibility.json"))
+        CueRemoval.bind(visibility)
+        visibility.remove(setOf(SongVisibility.key(first.cue.tracks.last()), SongVisibility.key(second.cue.tracks.first())))
+        EventQueue.invokeAndWait {}
+        start()
+
+        assertEquals(second.cue.tracks.last(), CueAlbumSequence.step(first.cue.tracks.first(), 1))
+        assertEquals(first.cue.tracks.first(), CueAlbumSequence.step(second.cue.tracks.last(), -1))
+        assertEquals(listOf(Triple("cd1", 0L, true), Triple("cd2", 7_000L, true), Triple("cd1", 0L, true)), requests)
+    }
+
     @Test fun nativeQueueCompletionDoesNotAlsoAdvanceTheLegacyAlbumSequence() {
         start()
         val oldOwner = PlaybackProbe.queuePlaybackOwnsEnd

@@ -48,6 +48,7 @@ internal class ProbeWindow(
     private var seekReport by mutableStateOf("")
     private var cuePath by mutableStateOf<Path?>(null)
     private var albumIds by mutableStateOf<List<String>?>(null)
+    private var albumReloadPending = false
     private var firstOpen = true
     private val crossFilePlayback = NativeAlbumPlayback.resolve()
 
@@ -79,7 +80,7 @@ internal class ProbeWindow(
                     diagnostics = showingDiagnostics,
                     report = apiReport ?: listOf(report, seekReport).filter(String::isNotBlank).joinToString("\n\n"),
                     showingApi = apiReport != null,
-                    managingAlbum = albumIds != null,
+                    managedAlbumIds = albumIds,
                     onDiscover = if (albumIds == null) ::discoverCurrent else ::refreshManagedAlbum,
                     onOpen = ::chooseFile,
                     onSelect = { selectedRow = it },
@@ -157,19 +158,27 @@ internal class ProbeWindow(
         val ids = albumIds ?: return
         if (worker != null || !active() || !canReadLibrary()) return
         refreshAlbum(ids)
-        discoverAlbum(ids)
     }
 
-    private fun discoverAlbum(ids: List<String>) {
+    fun reloadManagedAlbum(refreshedIds: List<String>) {
+        val ids = albumIds ?: return
+        if (!active() || ids.none { it in refreshedIds }) return
+        if (worker == null) discoverAlbum(ids, reload = true)
+        else albumReloadPending = true
+    }
+
+    private fun discoverAlbum(ids: List<String>, reload: Boolean = false) {
         if (!canReadLibrary()) {
             clearResult("读取专辑 CUE 需要曲库读取权限。")
             return
         }
         cuePath = null
-        clearResult("正在读取当前专辑的 CUE…")
-        runTask({ LibraryProbe.inspectAlbum(ids, active) }) { inspected ->
-            if (inspected.sheet.tracks.isEmpty()) status = "当前专辑没有匹配的 CUE 分轨。"
-            else showResult(null, inspected, "已读取专辑")
+        val loading = "正在读取当前专辑的 CUE…"
+        val previousTrack = if (reload) result?.sheet?.tracks?.getOrNull(selectedRow) else null
+        if (reload) status = loading else clearResult(loading)
+        runTask({ LibraryProbe.inspectAlbum(ids, active) }, clearOnFailure = true) { inspected ->
+            if (inspected.sheet.tracks.isEmpty()) clearResult("当前专辑没有匹配的 CUE 分轨。")
+            else showResult(null, inspected, "已读取专辑", previousTrack)
         }
     }
 
@@ -264,7 +273,7 @@ internal class ProbeWindow(
         status = message
     }
 
-    private fun showResult(file: Path?, data: ProbeResult, action: String) {
+    private fun showResult(file: Path?, data: ProbeResult, action: String, previousTrack: CueTrack? = null) {
         cuePath = file
         result = data
         report = buildString {
@@ -289,7 +298,8 @@ internal class ProbeWindow(
                 }
             }
         }
-        selectedRow = data.sheet.tracks.indexOfFirst { LibraryProbe.canSeek(it, data.current) }
+        val previousRow = cueWindowPlayingIndex(data.sheet.tracks, previousTrack)
+        selectedRow = if (previousRow >= 0) previousRow else data.sheet.tracks.indexOfFirst { LibraryProbe.canSeek(it, data.current) }
         status = "$action ${data.sheet.tracks.size} 轨" + when {
             !canReadLibrary() -> " · 曲库匹配与定位需要曲库读取权限"
             crossFilePlayback != null && data.matches.isNotEmpty() -> " · 双击可点播已匹配的分轨"
@@ -332,7 +342,7 @@ internal class ProbeWindow(
         }
     }
 
-    private fun <T> runTask(work: () -> T, completed: (T) -> Unit) {
+    private fun <T> runTask(work: () -> T, clearOnFailure: Boolean = false, completed: (T) -> Unit) {
         worker = object : SwingWorker<T, Void>() {
             override fun doInBackground(): T {
                 refreshVisibility()
@@ -346,8 +356,13 @@ internal class ProbeWindow(
                         completed(get())
                     } catch (error: ExecutionException) {
                         val cause = error.cause ?: error
-                        status = if (cause.isLibraryPermissionDenied()) "未授予曲库读取权限，可手动打开 CUE 预览。"
+                        val message = if (cause.isLibraryPermissionDenied()) "未授予曲库读取权限，可手动打开 CUE 预览。"
                         else "操作失败：${cause.message ?: cause.javaClass.simpleName}"
+                        if (clearOnFailure) clearResult(message) else status = message
+                    }
+                    if (albumReloadPending) {
+                        albumReloadPending = false
+                        albumIds?.let { discoverAlbum(it, reload = true) }
                     }
                 }
             }
@@ -355,6 +370,7 @@ internal class ProbeWindow(
     }
 
     private fun cancelWork() {
+        albumReloadPending = false
         val pending = worker
         worker = null
         pending?.cancel(true)

@@ -1,6 +1,7 @@
 package spw.cue
 
 import java.io.IOException
+import java.nio.file.DirectoryIteratorException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
@@ -8,6 +9,12 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 
 internal data class LocatedCue(val path: Path, val sheet: CueSheet)
+
+private val discDirectory = Regex("(?:cd|disc|disk|光盘|碟片)[\\s._-]*[0-9]{1,3}", RegexOption.IGNORE_CASE)
+
+internal fun discAlbumDirectory(directory: Path): Path? = directory.parent?.takeIf {
+    it.parent != null && discDirectory.matches(directory.fileName?.toString().orEmpty())
+}
 
 internal object CueDiscovery {
     private const val MAX_DIRECTORY_ENTRIES = 4096
@@ -47,7 +54,9 @@ internal object CueDiscovery {
         }
 
         fun invalidateFolders(folders: Set<Path>) {
-            if (folders.isNotEmpty()) entries.keys.filter { it.parent in folders }.forEach(::remove)
+            if (folders.isEmpty()) return
+            val affected = folders + folders.mapNotNull(::discAlbumDirectory)
+            entries.keys.filter { it.parent in affected }.forEach(::remove)
         }
 
         fun retainScanned(paths: Set<Path>) = entries.keys.filter { it !in paths }.forEach(::remove)
@@ -65,16 +74,21 @@ internal object CueDiscovery {
 
     fun find(audio: Path): LocatedCue? {
         val folder = audio.parent ?: return null
-        val candidates = candidates(folder)
+        findIn(candidates(folder), audio)?.let { return it }
+        val shared = discAlbumDirectory(folder)
+        if (shared != null) findIn(candidatesOrNull(shared).orEmpty(), audio)?.let { return it }
+        return EmbeddedFlacCue.find(audio)
+    }
+
+    private fun findIn(candidates: List<Path>, audio: Path): LocatedCue? {
         val sameName = candidates.filter { stem(it) == stem(audio) }
         val preferred = matches(sameName, audio)
         if (preferred.isNotEmpty()) return unique(preferred)
 
         return matches(candidates - sameName.toSet(), audio).takeIf { it.isNotEmpty() }?.let(::unique)
-            ?: EmbeddedFlacCue.find(audio)
     }
 
-    // The Songs page receives whole-library snapshots. Read each directory and CUE once per snapshot.
+    // Group direct and shared-directory matches so discs can reuse the same parsed CUE.
     fun refreshMatches(
         cached: Map<Path, LocatedCue>, sources: Set<Path>, active: () -> Boolean
     ): Map<Path, LocatedCue> = (cached - sources) + findAll(sources, active = active)
@@ -83,22 +97,12 @@ internal object CueDiscovery {
         audioFiles: Collection<Path>, cache: ParsedCueCache? = null, active: () -> Boolean
     ): Map<Path, LocatedCue> = buildMap {
         val scanned = cache?.let { mutableSetOf<Path>() }
-        for ((folder, files) in audioFiles.groupBy { it.parent }) {
-            if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
-            if (folder == null) continue
-            val available = files.toHashSet()
-            val candidates = try {
-                candidates(folder)
-            } catch (_: IOException) {
-                continue
-            } catch (_: IllegalStateException) {
-                continue
-            } catch (_: SecurityException) {
-                continue
-            }
+        val remaining = mutableListOf<Path>()
+
+        fun resolve(candidates: List<Path>, available: Set<Path>) {
             val byAudio = mutableMapOf<Path, MutableList<LocatedCue>>()
             for (path in candidates) {
-                if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
+                checkActive(active)
                 scanned?.add(path)
                 val cue = (if (cache == null) read(path) else cache.load(path)) ?: continue
                 for (audio in cue.sheet.tracks.map { it.audio }.distinct()) {
@@ -109,12 +113,45 @@ internal object CueDiscovery {
                 val preferred = matches.filter { stem(it.path) == stem(audio) }.ifEmpty { matches }
                 preferred.singleOrNull()?.let { put(audio, it) }
             }
-            for (audio in available - byAudio.keys) {
-                if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
-                EmbeddedFlacCue.find(audio)?.let { put(audio, it) }
-            }
+            // A conflict at this level needs manual selection rather than a different source.
+            remaining.addAll(available - byAudio.keys)
+        }
+
+        for ((folder, files) in audioFiles.groupBy { it.parent }) {
+            checkActive(active)
+            if (folder == null) continue
+            val candidates = candidatesOrNull(folder) ?: continue
+            resolve(candidates, files.toHashSet())
+        }
+
+        val parentGroups = remaining.groupBy { discAlbumDirectory(checkNotNull(it.parent)) }
+        remaining.clear()
+        for ((folder, files) in parentGroups) {
+            checkActive(active)
+            if (folder == null) remaining.addAll(files)
+            else resolve(candidatesOrNull(folder).orEmpty(), files.toHashSet())
+        }
+        for (audio in remaining) {
+            checkActive(active)
+            EmbeddedFlacCue.find(audio)?.let { put(audio, it) }
         }
         if (scanned != null) cache.retainScanned(scanned)
+    }
+
+    private fun checkActive(active: () -> Boolean) {
+        if (!active() || Thread.currentThread().isInterrupted) throw InterruptedException()
+    }
+
+    private fun candidatesOrNull(folder: Path): List<Path>? = try {
+        candidates(folder)
+    } catch (_: IOException) {
+        null
+    } catch (_: DirectoryIteratorException) {
+        null
+    } catch (_: IllegalStateException) {
+        null
+    } catch (_: SecurityException) {
+        null
     }
 
     private fun candidates(folder: Path): List<Path> {

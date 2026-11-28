@@ -74,7 +74,7 @@ internal fun ProbeWindowContent(
     diagnostics: Boolean,
     report: String,
     showingApi: Boolean,
-    managingAlbum: Boolean,
+    managedAlbumIds: List<String>?,
     onDiscover: () -> Unit,
     onOpen: () -> Unit,
     onSelect: (Int) -> Unit,
@@ -91,20 +91,25 @@ internal fun ProbeWindowContent(
 ) {
     val colors = probeColors(isSystemInDarkTheme(), probeHostTheme())
     val tracks = result?.sheet?.tracks.orEmpty()
-    var query by remember(result) { mutableStateOf("") }
-    var filter by remember(result) { mutableStateOf(CueTrackStatusFilter.All) }
+    val managingAlbum = managedAlbumIds != null
+    val viewKey = managedAlbumIds ?: result
+    var query by remember(viewKey) { mutableStateOf("") }
+    var filter by remember(viewKey) { mutableStateOf(CueTrackStatusFilter.All) }
     val trackKeys = remember(tracks) { tracks.map(SongVisibility::key) }
     val filteredTracks = remember(tracks, trackKeys, query, filter, visibility) {
         filterManagedCueTracks(tracks, trackKeys, query, filter, visibility)
     }
-    var checkedKeys by remember(result, query, filter) { mutableStateOf(emptySet<String>()) }
+    var checkedKeys by remember(viewKey, query, filter) { mutableStateOf(emptySet<String>()) }
+    LaunchedEffect(viewKey, trackKeys) {
+        checkedKeys = checkedKeys.intersect(trackKeys.toSet())
+    }
     val rows = remember(tracks, trackKeys, filteredTracks) { cueWindowRows(tracks, trackKeys, filteredTracks) }
     val playingIndex = cueWindowPlayingIndex(tracks, playingTrack)
-    var locateRevision by remember(result) { mutableStateOf(0L) }
-    var locateTarget by remember(result) { mutableStateOf(-1) }
-    var handledLocate by remember(result) { mutableStateOf(0L) }
-    val listState = key(result) { rememberLazyListState() }
-    LaunchedEffect(result, query, filter, locateRevision) {
+    var locateRevision by remember(viewKey) { mutableStateOf(0L) }
+    var locateTarget by remember(viewKey) { mutableStateOf(-1) }
+    var handledLocate by remember(viewKey) { mutableStateOf(0L) }
+    val listState = key(viewKey) { rememberLazyListState() }
+    LaunchedEffect(viewKey, query, filter, locateRevision) {
         val target = if (handledLocate != locateRevision) {
             handledLocate = locateRevision
             rows.indexOfFirst { it is CueWindowRow.Track && it.index == locateTarget }.coerceAtLeast(0)
@@ -261,7 +266,7 @@ internal fun ProbeWindowContent(
                         ProbeText("曲名 / 艺术家", colors.secondary, 12, Modifier.weight(1f))
                         TrackDurationCell("时长", colors.secondary)
                     }
-                    key(result) {
+                    key(viewKey) {
                         Box(Modifier.weight(1f)) {
                             LazyColumn(
                                 modifier = Modifier.fillMaxSize().padding(start = 6.dp, end = 14.dp),

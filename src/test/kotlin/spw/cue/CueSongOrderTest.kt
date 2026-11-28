@@ -97,4 +97,15 @@ class CueSongOrderTest {
         CueSongOrder.sourceChanged(plain.id, null)
         assertFalse(CueSongOrder.isWholeFile(disc.id))
     }
+
+    @Test fun theWholeFileCreditIsReadyBeforePlaybackAndDoesNotFollowAnotherRow() {
+        val rows = listOf(OrderedSong(disc, null, "Album Artist"), mixed[0], mixed[1])
+        CueSongOrder.start(rows, 0, { true }) { row, _, _ ->
+            assertEquals(if (row.cue == null) "Album Artist" else null, CueSongOrder.wholeFileArtist(disc.id))
+            assertNull(CueSongOrder.wholeFileArtist(plain.id))
+        }
+        val whole = checkNotNull(CueSongOrder.current("Circle", disc.id, audio))
+        assertTrue(CueSongOrder.advance(whole, "Circle", 1, emptySet(), { fail() }))
+        assertNull(CueSongOrder.wholeFileArtist(disc.id))
+    }
 }

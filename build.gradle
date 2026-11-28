@@ -5,7 +5,7 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.compose' version '2.4.20'
 }
 
-def releasedVersion = '0.8.0'
+def releasedVersion = '0.9.0'
 version = providers.gradleProperty('previewVersion').getOrElse(releasedVersion)
 
 java {
@@ -47,6 +47,7 @@ tasks.named('jar', Jar) {
             'Plugin-Provider': 'CUE for Salt Player',
             'Plugin-Name': 'CUE for Salt Player',
             'Plugin-Description': 'External and FLAC-embedded CUE tracks in Salt Player albums and songs',
+            'Plugin-Open-Source-Url': 'https://github.com/tigerJX95/CUE-for-Salt-Player',
             'Plugin-Has-Config': 'true',
             'Plugin-Permissions': 'key-bindings,library-read,class-transform'
         )

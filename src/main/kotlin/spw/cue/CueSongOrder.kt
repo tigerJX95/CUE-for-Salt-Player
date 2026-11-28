@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
-internal data class OrderedSong(val source: AlbumHookTarget.Track, val cue: CueTrack?)
+internal data class OrderedSong(val source: AlbumHookTarget.Track, val cue: CueTrack?, val wholeArtist: String? = null)
 
 /** Keep the visible song order separately from the native queue of whole audio files. */
 internal object CueSongOrder {
@@ -35,6 +35,11 @@ internal object CueSongOrder {
 
     fun isWholeFile(id: String?): Boolean = id != null && id == selected.value?.wholeSourceId()
 
+    fun wholeFileArtist(id: String?): String? {
+        val cursor = selected.value ?: return null
+        return cursor.row.wholeArtist.takeIf { id != null && id == cursor.wholeSourceId() }
+    }
+
     fun clear() { selected.value = null }
 
     fun isOrdered(mode: String?): Boolean = mode == "Circle" || mode == "CircleEnd"
@@ -58,8 +63,8 @@ internal object CueSongOrder {
         selected.value = Cursor(rows, index, active, play)
     }
 
-    fun startWholeFile(source: AlbumHookTarget.Track, active: () -> Boolean) {
-        selected.value = Cursor(listOf(OrderedSong(source, null)), 0, active, play = null)
+    fun startWholeFile(source: AlbumHookTarget.Track, artist: String? = null, active: () -> Boolean) {
+        selected.value = Cursor(listOf(OrderedSong(source, null, artist)), 0, active, play = null)
     }
 
     fun sourceChanged(id: String?, audio: Path?) {

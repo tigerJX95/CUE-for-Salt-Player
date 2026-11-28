@@ -50,6 +50,7 @@ internal class SongHookTarget private constructor(
     }
 
     fun duration(entity: Any): Long = sourceDuration.invoke(entity) as Long
+    fun title(entity: Any): String? = sourceTitle.invoke(entity) as? String
     fun album(entity: Any): String? = (sourceAlbum.invoke(entity) as? String)?.takeIf { it.isNotBlank() }
     fun artist(entity: Any): String? =
         (sourceArtist.invoke(entity) as? String).artistName() ?: (sourceAlbumArtist.invoke(entity) as? String).artistName()
