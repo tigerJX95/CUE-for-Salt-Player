@@ -121,7 +121,7 @@ public class HostRegressionGate {
         System.out.println("PASS album natural end suppresses the native queue once through the real host hook frame");
     }
 
-    static void wholeSongThroughHostFrame(Path folder,Object song,Object page,Object source,List<?> groups) throws Exception {
+    static void wholeSongThroughHostFrame(Path folder,Object song,Object page,Object source,List<?> groups,String expectedArtist) throws Exception {
         List<?> starts=(List<?>)song.getClass().getMethod("orderedStartCallbacks").invoke(song);
         Method start=starts.stream().map(Method.class::cast).filter(method->method.getParameterCount()==3)
             .findFirst().orElseThrow();
@@ -131,16 +131,20 @@ public class HostRegressionGate {
         Object site=frame.getParameterTypes()[1].getConstructor(int.class,Method.class,MethodHandle.class)
             .newInstance(1,start,original);
         Object hooks=hookRegistrar(folder);
-        Object call=frame.newInstance(hooks,site,null,new Object[]{groups,source,false});
+        // With the native playback flag the callback must prepare per-row metadata before delegating.
+        Object call=frame.newInstance(hooks,site,null,new Object[]{groups,source,expectedArtist!=null});
         Method before=page.getClass().getDeclaredMethod("beforeOrderedStart",
             type("com.xuncorp.spw.workshop.api.hook.MethodHookParam"));
         before.setAccessible(true);
         Object order=singleton("spw.cue.CueSongOrder");
         Method whole=order.getClass().getMethod("isWholeFile",String.class);
+        String id=(String)song.getClass().getMethod("id",Object.class).invoke(song,source);
         try {
             before.invoke(page,call);
-            require(whole.invoke(order,"source").equals(true) && whole.invoke(order,"normal").equals(false),
+            require(whole.invoke(order,id).equals(true) && whole.invoke(order,"normal").equals(false),
                 "Clicking the native whole-audio row must select the whole source");
+            require(Objects.equals(expectedArtist,order.getClass().getMethod("wholeFileArtist",String.class).invoke(order,id)),
+                "The Songs callback must publish the whole-file artist before native playback starts");
             require(frameType.getMethod("isOriginalSkipped").invoke(call).equals(false),
                 "When there is no ordered projection, the native whole-audio play action must still run");
         } finally {
@@ -433,11 +437,30 @@ public class HostRegressionGate {
         return rows;
     }
 
-    static void verifyAlreadyLoadedSongs(Path folder,Object target,Object page,Object sort,Object firstDisc,Object store) throws Exception {
-        Path secondFolder=Files.createDirectory(folder.resolve("CD2"));
-        Path secondAudio=Files.write(secondFolder.resolve("album.wav"),new byte[]{0});
-        Files.copy(folder.resolve("album.cue"),secondFolder.resolve("album.cue"));
-        Object secondDisc=track(secondAudio,"second-disc");
+    static void verifyAlreadyLoadedSongs(Path folder,Object target,Object page,Object sort,Object store) throws Exception {
+        Path album=Files.createDirectory(folder.resolve("shared-cue-album"));
+        Path cd1=Files.createDirectory(album.resolve("CD1"));
+        Path cd2=Files.createDirectory(album.resolve("CD2"));
+        Object firstDisc=track(Files.write(cd1.resolve("album.wav"),new byte[]{0}),"first-disc","","Album Artist");
+        Object secondDisc=track(Files.write(cd2.resolve("album.wav"),new byte[]{0}),"second-disc");
+        Path cue=album.resolve("album.cue");
+        String sheet="""
+            FILE "CD1/album.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE First
+              INDEX 01 00:00:00
+            TRACK 02 AUDIO
+              TITLE Second
+              INDEX 01 00:10:00
+            FILE "CD2/album.wav" WAVE
+            TRACK 03 AUDIO
+              TITLE Third
+              INDEX 01 00:00:00
+            TRACK 04 AUDIO
+              TITLE Fourth
+              INDEX 01 00:10:00
+            """;
+        Files.writeString(cue,sheet);
         Class<?> targetType=target.getClass(), pageType=page.getClass();
         Method filter=targetType.getMethod("filterTracks",List.class,Object.class,boolean.class,String.class);
         Object loaded=filter.invoke(target,List.of(firstDisc,secondDisc),sort,true,"");
@@ -476,9 +499,11 @@ public class HostRegressionGate {
         require(targetType.getMethod("count",Object.class).invoke(target,projected).equals(6),
             "Both whole-disc files and four CUE tracks must be listed without another host filter callback");
         Object groups=targetType.getMethod("groupEntities",Object.class).invoke(target,projected);
+        wholeSongThroughHostFrame(Files.createDirectory(folder.resolve("whole-song-artist-plugins")),
+            target,page,firstDisc,(List<?>)groups,"Album Artist");
         verifyListRows(hookRegistrar(Files.createDirectory(folder.resolve("already-loaded-song-plugins"))),
             target,page,groups,6);
-        System.out.println("PASS already-loaded Songs expands two CUE discs without waiting for a filter callback");
+        System.out.println("PASS already-loaded Songs expands two discs from one parent CUE without waiting for a filter callback");
 
         List<?> keys=new ArrayList<>(((Map<?,?>)field(groups,"selectionEntries")).values());
         Set<?> removed=Set.copyOf(keys.subList(0,2)), hidden=Set.copyOf(keys.subList(2,4));
@@ -493,6 +518,23 @@ public class HostRegressionGate {
         require(report.contains("已隐藏 2 条、已从曲库移除 2 条") && report.contains("可在「管理分轨」恢复"),
             "Songs diagnostics must distinguish recognized but excluded tracks: "+report);
         System.out.println("PASS Songs reports separate hide and removal counts with recovery guidance");
+
+        store.getClass().getMethod("restore",Set.class).invoke(store,new HashSet<>(keys));
+        Method refresh=pageType.getMethod("refreshAlbum",List.class);
+        Object firstId=targetType.getMethod("id",Object.class).invoke(target,firstDisc);
+        Method count=targetType.getMethod("count",Object.class);
+        Files.writeString(cue,sheet.substring(0,sheet.indexOf("FILE \"CD2/album.wav\"")));
+        refresh.invoke(page,List.of(firstId));
+        mountCurrent.invoke(page,flow,filtered,input,false,Set.of(),1L);
+        Object firstOnly=get.invoke(flow);
+        require(count.invoke(target,firstOnly).equals(4),"Refreshing only CD1 must also drop removed CD2 entries");
+
+        Files.writeString(cue,sheet);
+        refresh.invoke(page,List.of(firstId));
+        mountCurrent.invoke(page,flow,firstOnly,input,false,Set.of(),2L);
+        require(count.invoke(target,get.invoke(flow)).equals(6),
+            "Refreshing only CD1 must also discover CD2 when the shared CUE adds it back");
+        System.out.println("PASS refreshing one disc updates sibling discs from the shared CUE");
     }
 
     static void verifySongRowInput(Object song) throws Exception {
@@ -507,9 +549,13 @@ public class HostRegressionGate {
         Method keys=selection.getClass().getMethod("keys",Object.class);
         Method write=(Method)field(selection,"setSelectedKeys");
         String cue="spw.cue.support:songs:3:wav:1", normal="ordinary";
-        Method rowInput=Arrays.stream(type("spw.cue.NativeSongCueKt").getDeclaredMethods())
-            .filter(method->method.getName().startsWith("cueSongRowInput")).findFirst().orElseThrow();
         Class<?> modifier=type("androidx.compose.ui.Modifier"), f0=type("kotlin.jvm.functions.Function0");
+        Class<?> interactionSource=type("androidx.compose.foundation.interaction.MutableInteractionSource");
+        Method rowInput=Arrays.stream(type("spw.cue.NativeSongCueKt").getMethods())
+            .filter(method->method.getName().startsWith("cueSongRowInput-") && Modifier.isStatic(method.getModifiers()) &&
+                method.getReturnType()==modifier && Arrays.equals(method.getParameterTypes(),
+                    new Class<?>[]{modifier,boolean.class,long.class,interactionSource,boolean.class,f0}))
+            .findFirst().orElseThrow();
         Object base=modifier.getField("Companion").get(null);
         Object interaction=type("androidx.compose.foundation.interaction.InteractionSourceKt")
             .getMethod("MutableInteractionSource").invoke(null);
@@ -697,6 +743,10 @@ public class HostRegressionGate {
         return rows(target,(List<?>)field(projection,"selectableGroups"));
     }
     static Object track(Path path, String id) throws Exception {
+        return track(path,id,"Artist","Artist");
+    }
+
+    static Object track(Path path, String id, String artist, String albumArtist) throws Exception {
         Constructor<?> ctor = Arrays.stream(type("com.xuncorp.voxzen.data.entity.Track").getConstructors())
             .filter(c -> c.getParameterCount() == 23).findFirst().orElseThrow();
         Class<?>[] types = ctor.getParameterTypes();
@@ -705,10 +755,41 @@ public class HostRegressionGate {
             values[i]=types[i] == String.class ? "" : types[i] == int.class ? 0 : types[i] == long.class ? 0L :
                 types[i] == float.class ? 0f : types[i] == boolean.class ? false : null;
         }
-        values[0]=id;values[1]=id.equals("normal")?"Ordinary song":"Whole album";values[2]="Artist";values[3]="Album";values[4]="Artist";
+        values[0]=id;values[1]=id.equals("normal")?"Ordinary song":"Whole album";values[2]=artist;values[3]="Album";values[4]=albumArtist;
         values[11]=path.toString();values[12]=true;values[17]=30_000L;
         values[21]=type("com.xuncorp.voxzen.data.entity.ReplayGain").getConstructor().newInstance();
         return ctor.newInstance(values);
+    }
+
+    static void verifyWholeFileArtist(Object sheet,Method converter,Path audio) throws Exception {
+        Class<?> playback=type("spw.cue.HostCurrentPlayback");
+        Object current=playback.getConstructor().newInstance();
+        Method artist=playback.getMethod("trackArtist",Object.class), albumArtist=playback.getMethod("albumArtist",Object.class);
+        Method fallback=sheet.getClass().getMethod("wholeFileArtistFallback",String.class,String.class);
+        Object albumOnly=converter.invoke(null,track(audio,"album-only","","Album Artist"));
+        Object credited=converter.invoke(null,track(audio,"credited","Track Artist","Album Artist"));
+        Object unknown=converter.invoke(null,track(audio,"unknown","",""));
+        require("Album Artist".equals(fallback.invoke(sheet,artist.invoke(current,albumOnly),albumArtist.invoke(current,albumOnly))) &&
+            "Track Artist".equals(artist.invoke(current,credited)) &&
+            fallback.invoke(sheet,artist.invoke(current,credited),albumArtist.invoke(current,credited))==null &&
+            fallback.invoke(sheet,artist.invoke(current,unknown),albumArtist.invoke(current,unknown))==null,
+            "A CUE whole file must use the album credit only when the real native media has no track artist");
+        Path release=audio.resolveSibling("成龙&辛晓琪.-.[醉拳Ⅱ 电影原声带].wav");
+        Path cue=Files.writeString(audio.resolveSibling("release-credit.cue"),
+            "FILE \""+release.getFileName()+"\" WAVE\nTRACK 01 AUDIO\nPERFORMER Guest\nINDEX 01 00:00:00\n");
+        Object parser=singleton("spw.cue.CueParser");
+        Object releaseSheet=parser.getClass().getMethod("read",Path.class).invoke(parser,cue);
+        Object untagged=converter.invoke(null,track(release,"untagged","",""));
+        Object probe=singleton("spw.cue.LibraryProbe");
+        Method releaseFallback=probe.getClass().getMethod("wholeFileArtistFallback",sheet.getClass(),Path.class,
+            String.class,String.class,String.class,String.class);
+        require("成龙&辛晓琪".equals(releaseFallback.invoke(probe,releaseSheet,release,null,
+            playback.getMethod("title",Object.class).invoke(current,untagged),artist.invoke(current,untagged),
+            albumArtist.invoke(current,untagged))),"An untagged native media item must resolve the explicit release-name credit");
+        Object miniText=type("spw.cue.HostMiniPlayerText").getConstructor().newInstance();
+        require(((Map<?,?>)field(miniText,"roles")).values().stream().anyMatch(role->((Enum<?>)role).name().equals("ARTIST")),
+            "The host mini-player artist label must be a bound text role");
+        System.out.println("PASS whole-file mini player artist fallback uses the album credit from native media");
     }
 
     static void verifyAlbumActionPlacement(Object album,List<?> tracks) throws Exception {
@@ -869,6 +950,7 @@ public class HostRegressionGate {
                 librarySource.setAccessible(true);
                 Object windowMedia=field(librarySource.invoke(playback,libraryItem),"media");
                 Method converter=(Method)catalog.getClass().getMethod("getMediaConverter").invoke(catalog);
+                verifyWholeFileArtist(sheet,converter,audio);
                 Object convertedMedia=converter.invoke(null,source);
                 for (Method property:windowMedia.getClass().getDeclaredMethods()) {
                     if (property.getParameterCount()==0 && property.getReturnType()==String.class &&
@@ -885,7 +967,7 @@ public class HostRegressionGate {
                 Object diagnostics=type("spw.cue.SongPageDiagnostics").getConstructor().newInstance();
                 Object page=ctor.newInstance(song,function("kotlin.jvm.functions.Function0",false),
                     function("kotlin.jvm.functions.Function0",true),diagnostics,null,function("kotlin.jvm.functions.Function2",null));
-                wholeSongThroughHostFrame(Files.createDirectory(folder.resolve("whole-song-plugins")),song,page,source,originals);
+                wholeSongThroughHostFrame(Files.createDirectory(folder.resolve("whole-song-plugins")),song,page,source,originals,null);
                 Constructor<?> songState=(Constructor<?>)field(song,"songState");
                 Object sort=songState.getParameterTypes()[3].getEnumConstants()[0];
                 Object lateStore=type("spw.cue.SongVisibility").getConstructor(Path.class)
@@ -893,7 +975,7 @@ public class HostRegressionGate {
                 Object latePage=ctor.newInstance(song,function("kotlin.jvm.functions.Function0",false),
                     function("kotlin.jvm.functions.Function0",true),type("spw.cue.SongPageDiagnostics").getConstructor().newInstance(),
                     lateStore,function("kotlin.jvm.functions.Function2",null));
-                verifyAlreadyLoadedSongs(folder,song,latePage,sort,source,lateStore);
+                verifyAlreadyLoadedSongs(folder,song,latePage,sort,lateStore);
                 Object grouped=song.getClass().getMethod("filterTracks",List.class,Object.class,boolean.class,String.class)
                     .invoke(song,List.of(source,normal),sort,false,"");
                 List<?> artistGroups=(List<?>)song.getClass().getMethod("groupEntities",Object.class).invoke(song,grouped);

@@ -75,6 +75,20 @@ class CueTimeTest {
         assertEquals(-1, album.indexOfPlayingTrack(null))
     }
 
+    @Test fun navigationSkipsRemovedOrUnplayableSegmentsInEitherDirection() {
+        val first = track(0, 100)
+        val removed = track(100, 200).copy(number = 2)
+        val invalid = track(200, 200).copy(number = 3)
+        val last = track(300, null).copy(number = 4)
+        val tracks = listOf(first, removed, invalid, last)
+        val excluded = setOf(SongVisibility.key(removed))
+
+        assertEquals(last, adjacentCueTrack(tracks, first, 400_000, 1, excluded))
+        assertEquals(first, adjacentCueTrack(tracks, last, 400_000, -1, excluded))
+        assertEquals(removed, adjacentCueTrack(tracks, first, 400_000, 1))
+        assertNull(adjacentCueTrack(tracks, first, 300_000, 1, excluded))
+    }
+
     private fun window(startSeconds: Long, endSeconds: Long?, fileSeconds: Long): CuePlaybackWindow =
         checkNotNull(CuePlaybackWindow.from(track(startSeconds, endSeconds), fileSeconds * 1_000))
 

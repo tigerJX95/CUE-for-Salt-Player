@@ -15,7 +15,6 @@ import javax.imageio.stream.MemoryCacheImageInputStream
 
 internal object FolderCover {
     private val names = listOf("cover.png", "cover.jpg", "folder.png", "folder.jpg")
-    private val discDirectory = Regex("(?:cd|disc|disk|光盘|碟片)[\\s._-]*[0-9]{1,3}", RegexOption.IGNORE_CASE)
 
     // Used by the playback collector. Cache decoded files, not missing covers or library lookups.
     class DecodedCache {
@@ -25,7 +24,7 @@ internal object FolderCover {
 
         fun invalidateSong(audio: Path) {
             val directory = audio.parent ?: return
-            val shared = albumDirectory(directory)
+            val shared = discAlbumDirectory(directory)
             images.keys.removeAll { (path, _) -> path.parent == directory || path.parent == shared }
         }
 
@@ -48,7 +47,7 @@ internal object FolderCover {
 
     fun loadSong(audio: Path, maxSize: Int = 512, cache: DecodedCache? = null): BufferedImage? {
         val directory = audio.parent ?: return null
-        return loadDirectory(directory, maxSize, cache) ?: albumDirectory(directory)?.let { loadDirectory(it, maxSize, cache) }
+        return loadDirectory(directory, maxSize, cache) ?: discAlbumDirectory(directory)?.let { loadDirectory(it, maxSize, cache) }
     }
 
     // A catalog thumbnail exposes only its representative audio, not the album's track list.
@@ -56,11 +55,7 @@ internal object FolderCover {
     // Callers must first verify that the representative audio has a matching CUE.
     fun loadCatalog(audio: Path, maxSize: Int = 512): BufferedImage? {
         val directory = audio.parent ?: return null
-        return albumDirectory(directory)?.let { loadDirectory(it, maxSize) } ?: loadDirectory(directory, maxSize)
-    }
-
-    private fun albumDirectory(directory: Path): Path? = directory.parent?.takeIf {
-        it.parent != null && discDirectory.matches(directory.fileName?.toString().orEmpty())
+        return discAlbumDirectory(directory)?.let { loadDirectory(it, maxSize) } ?: loadDirectory(directory, maxSize)
     }
 
     fun loadMultiDisc(audioFiles: List<Path>, maxSize: Int = 512): BufferedImage? {

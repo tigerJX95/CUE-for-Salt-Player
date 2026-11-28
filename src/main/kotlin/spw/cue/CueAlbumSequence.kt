@@ -50,11 +50,16 @@ internal class CueAlbumSequence(
         }
 
         fun step(from: CueTrack, step: Int): CueTrack? {
+            if (step != 1 && step != -1) return null
             val selected = current.get() ?: return null
             if (selected.disc.audio != from.audio || !isCurrent(selected)) return null
-            val tracks = selected.disc.cue.tracks
-            val edge = if (step > 0) tracks.lastOrNull() else tracks.firstOrNull()
-            if (edge?.startMs != from.startMs) return null
+            val cue = selected.disc.cue
+            if (cue.tracks.none { it.matchesPlaybackTrack(from) && it.startMs == from.startMs }) return null
+            val hasPlayableNeighbor = CueRemoval.visibleAlbum(cue).tracks.any { track ->
+                (if (step > 0) track.startMs > from.startMs else track.startMs < from.startMs) &&
+                    CuePlaybackWindow.from(track, cue.durationMs) != null
+            }
+            if (hasPlayableNeighbor) return null
             return move(selected, step)
         }
 

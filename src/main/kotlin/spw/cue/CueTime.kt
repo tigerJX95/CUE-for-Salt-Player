@@ -16,10 +16,21 @@ internal fun cueTrackAt(tracks: List<CueTrack>, positionMs: Long, durationMs: Lo
     return track.takeIf { end == null || positionMs < end }
 }
 
-internal fun adjacentCueTrack(tracks: List<CueTrack>, current: CueTrack, durationMs: Long, step: Int): CueTrack? {
+internal fun adjacentCueTrack(
+    tracks: List<CueTrack>, current: CueTrack, durationMs: Long, step: Int, removed: Set<String> = emptySet()
+): CueTrack? {
     val index = tracks.indexOf(current)
     if (index < 0) return null
-    return tracks.getOrNull(index + step)?.takeIf { it.startMs in 0 until durationMs }
+    val candidates = when (step) {
+        1 -> index + 1 until tracks.size
+        -1 -> index - 1 downTo 0
+        else -> return null
+    }
+    return candidates.firstNotNullOfOrNull { position ->
+        tracks[position].takeIf {
+            CuePlaybackWindow.from(it, durationMs) != null && (removed.isEmpty() || SongVisibility.key(it) !in removed)
+        }
+    }
 }
 
 internal fun taskbarCueTimes(tracks: List<CueTrack>, positionMs: Long, durationMs: Long): Pair<Long, Long>? {

@@ -5,6 +5,7 @@ import com.xuncorp.spw.workshop.api.WorkshopApi
 import com.xuncorp.spw.workshop.api.PluginPermission
 import com.xuncorp.spw.workshop.api.PluginPermissionDeniedException
 import com.xuncorp.spw.workshop.api.hook.HookRegistrar
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
@@ -13,6 +14,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
@@ -20,6 +22,42 @@ import org.junit.rules.TemporaryFolder
 
 class LibraryProbeTest {
     @get:Rule val temp = TemporaryFolder()
+
+    @Test fun wholeFileArtistReadsTheMatchingLibraryEntryBeforeTheReleaseFilename() {
+        val audio = temp.root.toPath().resolve("文件名艺术家.-.[测试专辑].wav")
+        val sheet = CueSheet("test", null, listOf(CueTrack(1, "First", "客席", audio, 0, null, null, null)))
+        val matching = item(audio, "matching").copy(albumArtist = "曲库专辑艺术家")
+        val other = item(audio.resolveSibling("other.wav"), "other").copy(artist = "其他艺术家")
+        val host = Host(null, listOf(matching, other))
+        WorkshopApi.instance = host
+
+        assertNull(LibraryProbe.wholeFileArtistFallback(sheet, audio, "matching", null, "已有艺术家", null))
+        assertEquals("播放专辑艺术家", LibraryProbe.wholeFileArtistFallback(sheet, audio, "matching", null, "", "播放专辑艺术家"))
+        assertEquals(emptyList<String>(), host.queriedIds)
+        assertEquals("曲库专辑艺术家", LibraryProbe.wholeFileArtistFallback(sheet, audio, "matching", null, "", null))
+        assertEquals("文件名艺术家", LibraryProbe.wholeFileArtistFallback(sheet, audio, "other", null, "", null))
+        assertEquals(listOf("matching", "other"), host.queriedIds)
+    }
+
+    @Test fun wholeFileArtistRecognizesTheReleaseNameWithoutTakingAGuestOrGuessingAnOrdinaryTitle() {
+        val folder = temp.root.toPath()
+        val audio = folder.resolve("成龙&辛晓琪.-.[醉拳Ⅱ 电影原声带](1994)[WAV].wav")
+        val cue = Files.writeString(folder.resolve("soundtrack.cue"), """
+            FILE "${audio.fileName}" WAVE
+            TRACK 01 AUDIO
+              PERFORMER "客席"
+              INDEX 01 00:00:00
+        """.trimIndent())
+        val sheet = CueParser.read(cue)
+        val plain = folder.resolve("Track - Remix.wav")
+        val untagged = sheet.copy(tracks = sheet.tracks.map { it.copy(audio = plain) })
+
+        assertEquals("成龙&辛晓琪", LibraryProbe.wholeFileArtistFallback(sheet, audio, null, null, null, null))
+        assertEquals("客席", sheet.tracks.single().performer)
+        assertNull(LibraryProbe.wholeFileArtistFallback(sheet, plain, null, null, null, null))
+        assertNull(LibraryProbe.wholeFileArtistFallback(untagged, plain, null, "Track - Remix", null, null))
+        assertEquals("专辑署名", LibraryProbe.wholeFileArtistFallback(untagged, plain, null, "专辑署名.-.【某某专辑】", null, null))
+    }
 
     @Test fun previewsManualCueWithoutRequestingLibraryAccess() {
         val file = temp.newFile("preview.cue").apply {
@@ -301,6 +339,87 @@ class LibraryProbeTest {
             requests.add(position to switch)
         }
         assertEquals(listOf(3_000L to true), requests)
+    }
+
+    @Test fun currentAlbumRecoveryUsesEachDiscsPreferredCueAndSkipsConflicts() {
+        val root = temp.newFolder("Album").toPath()
+        val cd1 = Files.createDirectory(root.resolve("CD1"))
+        val cd2 = Files.createDirectory(root.resolve("CD2"))
+        val shared = root.resolve("shared.cue")
+        shared.toFile().writeText("""
+            FILE "CD1/first.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE Shared first
+              INDEX 01 00:00:00
+            FILE "CD2/second.wav" WAVE
+            TRACK 02 AUDIO
+              TITLE Shared second
+              INDEX 01 00:00:00
+        """.trimIndent())
+        val first = item(cd1.resolve("first.wav"), "1").copy(album = "Album", albumArtist = "Album Artist")
+        val second = item(cd2.resolve("second.wav"), "2").copy(album = "Album", albumArtist = "Album Artist")
+        WorkshopApi.instance = Host(first, listOf(first, second))
+        val audio = Path.of(first.path)
+
+        val allShared = requireNotNull(LibraryProbe.inspectPlayingAlbum(first, audio) { true })
+        assertEquals(shared, allShared.file)
+        assertEquals(listOf("Shared first", "Shared second"), allShared.result.sheet.tracks.map { it.title })
+
+        val local = cd2.resolve("local.cue").toFile()
+        local.writeText("""
+            FILE "second.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE Local second
+              INDEX 01 00:00:00
+        """.trimIndent())
+        val mixed = requireNotNull(LibraryProbe.inspectPlayingAlbum(first, audio) { true })
+        assertEquals(null, mixed.file)
+        assertEquals(listOf("Shared first", "Local second"), mixed.result.sheet.tracks.map { it.title })
+        assertEquals(setOf(first, second), mixed.result.matches.values.toSet())
+
+        local.copyTo(cd2.resolve("alternate.cue").toFile())
+        val conflict = requireNotNull(LibraryProbe.inspectPlayingAlbum(first, audio) { true })
+        assertEquals(listOf("Shared first"), conflict.result.sheet.tracks.map { it.title })
+        assertEquals(listOf(first), conflict.result.matches.values.toList())
+    }
+
+    @Test fun currentCueWithoutAlbumTagsUsesTheMatchingLocalCueForReferencedDiscs() {
+        val root = temp.newFolder("Album").toPath()
+        val cd1 = Files.createDirectory(root.resolve("CD1"))
+        val cd2 = Files.createDirectory(root.resolve("CD2"))
+        val shared = Files.writeString(root.resolve("shared.cue"), """
+            TITLE Collection
+            FILE "CD1/first.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE Shared first
+              INDEX 01 00:00:00
+            FILE "CD2/second.wav" WAVE
+            TRACK 02 AUDIO
+              TITLE Shared second
+              INDEX 01 00:00:00
+        """.trimIndent())
+        val local = Files.writeString(cd2.resolve("local.cue"), """
+            FILE "second.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE Local second
+              INDEX 01 00:00:00
+        """.trimIndent())
+        val first = item(cd1.resolve("first.wav"), "1")
+        val second = item(cd2.resolve("second.wav"), "2")
+        val audio = Path.of(first.path)
+        WorkshopApi.instance = Host(first, listOf(first, second))
+
+        val found = requireNotNull(LibraryProbe.inspectPlayingAlbum(first, audio) { true })
+        assertNull(found.file)
+        assertEquals("Collection", found.result.sheet.title)
+        assertEquals(listOf("Shared first", "Local second"), found.result.sheet.tracks.map { it.title })
+        assertEquals(setOf(first, second), found.result.matches.values.toSet())
+        assertEquals(listOf("Shared first", "Shared second"), LibraryProbe.inspect(shared).sheet.tracks.map { it.title })
+
+        Files.copy(local, cd2.resolve("alternate.cue"))
+        val conflict = requireNotNull(LibraryProbe.inspectPlayingAlbum(first, audio) { true })
+        assertEquals(listOf("Shared first"), conflict.result.sheet.tracks.map { it.title })
+        assertEquals(listOf(first), conflict.result.matches.values.toList())
     }
 
     private fun item(path: Path, id: String) =

@@ -46,6 +46,7 @@ internal class NativeMiniPlayerCue(
     private var shuffleStatus = "等待注册"
     private val queueEndProbe = { shuffle?.ownsNaturalEnd() == true }
     private val display = MutableStateFlow<Display?>(null)
+    private val cueFileArtist = MutableStateFlow<ShownArtist?>(null)
     private val discLink = CueDiscLink()
     private val cueRevision = MutableStateFlow(0L)
     val taskbarTracks: Flow<Pair<Any, CueTrack>?> =
@@ -127,14 +128,20 @@ internal class NativeMiniPlayerCue(
         scope.launch {
             combine(host.current, cueRevision, CueSongOrder.wholeSourceId) { item, _, _ -> item }.collectLatest { item ->
                 CueAlbumSequence.sourceChanged(item?.let(::audioPath))
-                textBinding?.restoreVisibleLabels()
-                display.value = null
-                discLink.publish(null, null)
+                if (item == null || display.value?.item !== item || !followsCue(item)) clearDisplay()
                 if (item != null && active()) {
                     val id = host.id.invoke(item) as? String
                     if (host.current.value === item) CueSongOrder.sourceChanged(id, audioPath(item))
                     if (CueSongOrder.isWholeFile(id)) {
                         status("当前播放整轨")
+                        if (host.trackArtist(item) == null) {
+                            val ready = readyWholeFileArtist(item)
+                            if (ready != null) {
+                                cueFileArtist.value = ShownArtist(item, ready, wholeFile = true)
+                                updateVisibleArtist(item, ready)
+                            }
+                            follow(item, wholeFile = true)
+                        }
                     } else {
                         status("正在查找当前音频的 CUE")
                         follow(item)
@@ -199,7 +206,7 @@ internal class NativeMiniPlayerCue(
                 val position = host.position.invoke(progress) as Long
                 val duration = host.duration.invoke(progress) as Long
                 val current = cueTrackAt(match.tracks, position, duration) ?: return@before
-                val target = adjacentCueTrack(match.tracks, current, duration, step)
+                val target = adjacentCueTrack(match.tracks, current, duration, step, removed())
                 if (host.current.value !== match.item) return@before
                 if (target != null) call.setResult(null)
                 try {
@@ -223,27 +230,61 @@ internal class NativeMiniPlayerCue(
     private fun followsCue(item: Any): Boolean =
         active() && host.current.value === item && !CueSongOrder.isWholeFile(host.id.invoke(item) as? String)
 
-    private suspend fun follow(item: Any) {
+    private fun readyWholeFileArtist(item: Any): String? {
+        if (!active() || host.current.value !== item || host.trackArtist(item) != null) return null
+        val artist = CueSongOrder.wholeFileArtist(host.id.invoke(item) as? String) ?: return null
+        return host.albumArtist(item) ?: artist
+    }
+
+    private fun clearDisplay() {
+        textBinding?.restoreVisibleLabels()
+        display.value = null
+        cueFileArtist.value = null
+        discLink.publish(null, null)
+    }
+
+    private suspend fun follow(item: Any, wholeFile: Boolean = false) {
         val audio = audioPath(item)
         if (audio == null) {
             status("当前播放路径不可用")
             return
         }
-        val cueTracks = try {
+        val sheet = try {
             runInterruptible(Dispatchers.IO) {
-                CueDiscovery.find(audio)?.sheet?.tracks?.filter { it.audio == audio }.orEmpty()
+                CueDiscovery.find(audio)?.sheet
             }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            status("读取播放分轨失败：${error.javaClass.simpleName}")
+            if (followsCue(item)) clearDisplay()
+            if (!wholeFile) status("读取播放分轨失败：${error.javaClass.simpleName}")
             return
         }
+        val id = host.id.invoke(item) as? String
+        val playingWholeFile = CueSongOrder.isWholeFile(id)
+        if (!active() || host.current.value !== item || playingWholeFile != wholeFile) return
+        val cueTracks = sheet?.tracks?.filter { it.audio == audio }.orEmpty()
         if (cueTracks.isEmpty()) {
-            status("当前音频无匹配 CUE")
+            if (followsCue(item)) clearDisplay()
+            if (!wholeFile) status("当前音频无匹配 CUE")
             return
         }
-        val fallback = host.fallbackArtist(item)
+        val artist = host.trackArtist(item)
+        val albumArtist = host.albumArtist(item)
+        val fileArtist = if (artist == null && sheet != null) {
+            val title = host.title(item)
+            runInterruptible(Dispatchers.IO) {
+                LibraryProbe.wholeFileArtistFallback(sheet, audio, id, title, artist, albumArtist)
+            }
+        } else null
+        if (!active() || host.current.value !== item || CueSongOrder.isWholeFile(id) != wholeFile) return
+        val resolvedFileArtist = fileArtist ?: if (wholeFile) readyWholeFileArtist(item) else null
+        cueFileArtist.value = resolvedFileArtist?.let { ShownArtist(item, it, wholeFile) }
+        if (wholeFile) {
+            updateVisibleArtist(item, resolvedFileArtist)
+            return
+        }
+        val fallback = artist ?: albumArtist
         val tracks = if (fallback == null) cueTracks else cueTracks.map { track ->
             if (track.performer == null) track.copy(performer = fallback) else track
         }
@@ -256,11 +297,11 @@ internal class NativeMiniPlayerCue(
                 cueTrackAt(tracks, position, duration)
             }
         }.onEach { track ->
-            if (!followsCue(item) || linkedStart == track?.startFrame) return@onEach
+            if (!followsCue(item)) return@onEach
             if (track == null) {
-                discLink.publish(null, null)
+                if (linkedStart != null || display.value != null) discLink.publish(null, null)
                 linkedStart = null
-            } else {
+            } else if (linkedStart != track.startFrame) {
                 // Use the same path as the disc plugin. Retry on the next
                 // progress event if the Workshop item is still transitioning.
                 val playbackItem = runCatching { LibraryProbe.current() }.getOrNull()
@@ -274,7 +315,8 @@ internal class NativeMiniPlayerCue(
             if (followsCue(item)) {
                 display.value = track?.let { Display(item, tracks, it) }
                 if (track == null) {
-                    textBinding?.restoreVisibleLabels()
+                    textBinding?.restoreVisibleLabel(Role.TITLE)
+                    updateVisibleArtist(item, fileArtist)
                 } else {
                     updateVisibleMetadata(item, track)
                 }
@@ -290,7 +332,11 @@ internal class NativeMiniPlayerCue(
                 titleStatus = "已更新当前页面第 ${track.number} 轨"
             }
         }
-        val artist = track.performer
+        updateVisibleArtist(item, track.performer)
+    }
+
+    private fun updateVisibleArtist(item: Any, artist: String?) {
+        val text = textBinding ?: return
         if (artist == null) {
             text.restoreVisibleLabel(Role.ARTIST)
         } else if (Role.ARTIST !in boundLabels) {
@@ -374,7 +420,14 @@ internal class NativeMiniPlayerCue(
         val match = currentDisplay()
         val label = when (role) {
             Role.TITLE -> match?.track?.title
-            Role.ARTIST -> match?.track?.performer
+            Role.ARTIST -> if (match != null) match.track.performer else {
+                // The selected song carries its known credit before a playback item is published.
+                cueFileArtist.collectAsState().value?.takeIf {
+                    active() && host.current.value === it.item &&
+                        it.wholeFile == CueSongOrder.isWholeFile(host.id.invoke(it.item) as? String)
+                }?.name
+                    ?: host.current.value?.let(::readyWholeFileArtist)
+            }
             Role.ELAPSED -> currentCueProgress(match)?.let {
                 formatCueTime(it.window.elapsedMs(it.position))
             }
@@ -474,6 +527,7 @@ internal class NativeMiniPlayerCue(
     private data class TrackProgress(val track: CueTrack, val window: CuePlaybackWindow, val position: Long)
 
     private data class Display(val item: Any, val tracks: List<CueTrack>, val track: CueTrack)
+    private data class ShownArtist(val item: Any, val name: String, val wholeFile: Boolean)
 
     private class HostAlbumRow {
         private val track = HostCatalog.track
@@ -539,9 +593,12 @@ internal class HostCurrentPlayback {
         JvmModifier.isStatic(it.modifiers) && it.flowType() == progressType
     }.invoke(null) as StateFlow<*>
 
-    fun fallbackArtist(item: Any): String? =
-        (mediaFields[2].invoke(item) as? String).artistName()
-            ?: (mediaFields[4].invoke(item) as? String).artistName()
+    fun title(item: Any): String? = mediaFields[1].invoke(item) as? String
+
+    fun trackArtist(item: Any): String? = (mediaFields[2].invoke(item) as? String).artistName()
+
+    fun albumArtist(item: Any): String? = (mediaFields[4].invoke(item) as? String).artistName()
+
 
     private fun Method.flowType(): Class<*>? {
         val signature = genericReturnType as? ParameterizedType ?: return null

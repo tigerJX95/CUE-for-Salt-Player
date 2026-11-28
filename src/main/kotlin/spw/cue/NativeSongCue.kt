@@ -104,6 +104,7 @@ internal class NativeSongCue(
         val source: AlbumHookTarget.Track,
         val track: CueTrack,
         val artist: String,
+        val wholeArtist: String?,
         val album: String,
         val artwork: SongArtwork,
         val fileDuration: Long,
@@ -554,15 +555,17 @@ internal class NativeSongCue(
         try {
             val selection = call.args[1]
             val mode = selection as? Enum<*>
+            val displayed = songStartGroups(call.args.firstOrNull())
             val selectedSource = if (mode == null) {
                 val entity = checkNotNull(selection)
                 AlbumHookTarget.Track(target.id(entity), entity).also {
                     CueAlbumSequence.clear()
-                    CueSongOrder.startWholeFile(it, active)
+                    val credit = displayed?.playbackRows?.firstOrNull { row -> row.cue == null && row.source.id == it.id }
+                    CueSongOrder.startWholeFile(it, credit?.wholeArtist, active)
                 }
             } else null
             if (call.args.getOrNull(2) == true) return
-            val visible = orderedStartGroups(call.args.firstOrNull())
+            val visible = orderedStartGroups(displayed)
             if (visible == null) {
                 if (mode != null) CueSongOrder.clear()
                 return
@@ -586,9 +589,11 @@ internal class NativeSongCue(
         }
     }
 
+    private fun songStartGroups(input: Any?): SongGroups? =
+        (input as? SongGroups) ?: (input as? RenderingGroups)?.projection
+
     private fun orderedStartGroups(input: Any?): SongGroups? =
-        ((input as? SongGroups) ?: (input as? RenderingGroups)?.projection)
-            ?.takeIf { !it.artistPage && it.cueKeys.isNotEmpty() }
+        songStartGroups(input)?.takeIf { !it.artistPage && it.cueKeys.isNotEmpty() }
 
     private fun beginOrderedPlayback(groups: SongGroups, index: Int) {
         CueAlbumSequence.clear()
@@ -877,7 +882,7 @@ internal class NativeSongCue(
         val cached = previous?.takeIf { indexed.get() === entities }
         if (cached != null && refreshIds.isEmpty()) return cached
         val catalogue = cached?.catalogue ?: catalogue(entities)
-        val refreshedPaths = catalogue.pathsFor(refreshIds)
+        val refreshedPaths = catalogue.pathsForRefresh(refreshIds)
         if (cached != null && refreshedPaths.isEmpty()) return cached
         parsedCues.invalidateFolders(refreshedPaths.mapNotNullTo(mutableSetOf()) { it.parent })
         val cues = if (cached == null) {
@@ -890,7 +895,7 @@ internal class NativeSongCue(
         val updated = if (reusable == null) {
             // A fresh Track list can still describe the same songs and already decoded covers.
             val artwork = previous?.songs?.values.orEmpty()
-                .filterNot { it.source.id in refreshIds }
+                .filterNot { it.track.audio in refreshedPaths }
                 .associate { it.source.entity to it.artwork }
             buildIndex(catalogue, cues, artwork)
         } else {
@@ -961,7 +966,8 @@ internal class NativeSongCue(
         if (id.isBlank() || !Files.isRegularFile(audio) || !Files.isReadable(audio)) return
         val fileDuration = target.duration(entity)
         val source = AlbumHookTarget.Track(id, entity)
-        val sourceArtist = target.artist(entity).orEmpty()
+        val sourceArtist = target.artist(entity)
+        val wholeArtist = sourceArtist ?: sheet.albumPerformer ?: LibraryProbe.releaseNameArtist(audio, target.title(entity))
         val album = target.album(entity) ?: sheet.title.orEmpty()
         val artwork = cachedArtwork ?: SongArtwork(id, audio)
         val split = buildList {
@@ -969,9 +975,9 @@ internal class NativeSongCue(
                 val window = CuePlaybackWindow.from(segment, fileDuration) ?: continue
                 val key = "$CUE_SONG_KEY_PREFIX${id.length}:$id:${segment.number}"
                 if (key in originalIds || key in songs) continue
-                val artist = segment.performer ?: sourceArtist
+                val artist = segment.performer ?: sourceArtist.orEmpty()
                 val row = target.trackForFilter(entity, key, segment, artist, window.durationMs)
-                val song = Song(key, SongVisibility.key(segment), source, segment, artist, album, artwork, fileDuration, window.durationMs)
+                val song = Song(key, SongVisibility.key(segment), source, segment, artist, wholeArtist, album, artwork, fileDuration, window.durationMs)
                 add(ProjectedTrack(row, song))
                 songs[key] = song
             }
@@ -1034,6 +1040,7 @@ internal class NativeSongCue(
         val rowPlans = mutableListOf<GroupPlan>()
         val cueKeys = mutableSetOf<String>()
         val cueSources = songs.values.associate { it.source.id to it.artwork }
+        val wholeArtists = songs.values.associate { it.source.entity to it.wholeArtist }
         val nativeGroups = mutableListOf<Any>()
         val renderingGroups = groups.map { group ->
             val originals = mutableListOf<Any>()
@@ -1056,7 +1063,7 @@ internal class NativeSongCue(
         val playbackRows = groups.flatMap { target.tracksIn(it).filterNotNull() }.map { entity ->
             val id = target.id(entity)
             val song = songs[id]
-            OrderedSong(song?.source ?: AlbumHookTarget.Track(id, entity), song?.track)
+            OrderedSong(song?.source ?: AlbumHookTarget.Track(id, entity), song?.track, wholeArtists[entity])
         }
         val playbackTracks = playbackRows.map { it.source }.distinctBy { it.id }
         return SongGroups(nativeGroups, renderingGroups, groups, cueKeys, rowPlans, playbackRows, playbackTracks, artistPage)

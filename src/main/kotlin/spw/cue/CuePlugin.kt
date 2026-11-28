@@ -502,6 +502,7 @@ class CuePlugin(context: PluginContext) : SpwPlugin(context) {
         songPage?.refreshAlbum(ids)
         miniPlayerCue?.refreshCue()
         playbackCover?.refreshAlbum(ids)
+        window?.takeIf { it.isDisplayable }?.reloadManagedAlbum(ids)
     }
 
     private fun showAlbumWindow(session: Session, ids: List<String>) {

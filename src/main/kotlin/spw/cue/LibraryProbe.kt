@@ -35,6 +35,8 @@ internal data class AlbumCue(val tracks: List<CueTrack>, val durationMs: Long) {
 internal data class AlbumCueSource(val trackId: String, val audio: Path, val cue: AlbumCue)
 
 internal object LibraryProbe {
+    private val releaseFileCredit = Regex("""^(.{1,120}?)\s*\.-\.\s*[\[［【]([^\]］】]{1,200})[\]］】]""")
+
     fun inspect(cue: Path, readLibrary: Boolean = true): ProbeResult {
         val sheet = CueParser.read(cue)
         val preview = ProbeResult(sheet, emptyMap(), null)
@@ -49,34 +51,67 @@ internal object LibraryProbe {
 
     fun current(): MediaItem? = WorkshopApi.playback.getCurrentMediaItem()
 
+    fun wholeFileArtistFallback(
+        sheet: CueSheet, audio: Path, id: String?, title: String?, artist: String?, albumArtist: String?
+    ): String? {
+        if (artist.artistName() != null || sheet.tracks.none { it.audio == audio }) return null
+        sheet.wholeFileArtistFallback(null, albumArtist)?.let { return it }
+        val item = if (id.isNullOrBlank()) null else try {
+            WorkshopApi.library.getTrackById(id).toCompletableFuture().get(1, TimeUnit.SECONDS)
+                ?.takeIf { it.id == id && pathOf(it) == audio }
+        } catch (error: InterruptedException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        (item?.artist.artistName() ?: item?.albumArtist.artistName())?.let { return it }
+        return releaseNameArtist(audio, title)
+    }
+
+    // A rip can use “Artist.-.[Album]...” even when its audio and sheet have no artist tags.
+    fun releaseNameArtist(audio: Path, title: String?): String? =
+        sequenceOf(audio.fileName?.toString(), title).filterNotNull().firstNotNullOfOrNull { name ->
+            val match = releaseFileCredit.find(name.trim()) ?: return@firstNotNullOfOrNull null
+            match.groupValues[1].artistName()?.takeIf {
+                it.any(Char::isLetter) && match.groupValues[2].any(Char::isLetter)
+            }
+        }
+
     fun inspectPlayingAlbum(current: MediaItem, audio: Path, active: () -> Boolean): FollowedCue? {
         val located = CueDiscovery.find(audio) ?: return null
         val album = current.album.trim()
         val artist = current.albumArtist.trim().ifBlank { current.artist.trim() }
-        if (album.isEmpty() || artist.isEmpty()) {
-            return FollowedCue(located.path, inspect(located.sheet, current))
-        }
-
         val explicit = located.sheet.tracks.mapTo(mutableSetOf()) { it.audio }
-        val sources = linkedMapOf(audio to current)
-        for (item in libraryTracks(active)) {
-            val path = pathOf(item) ?: continue
-            val sameAlbum = item.album.trim().equals(album, ignoreCase = true) &&
-                item.albumArtist.trim().ifBlank { item.artist.trim() }.equals(artist, ignoreCase = true) &&
-                (current.year <= 0 || item.year <= 0 || current.year == item.year)
-            if (sameAlbum || path in explicit) sources.putIfAbsent(path, item)
+        val sources = if (album.isEmpty() || artist.isEmpty()) {
+            inspect(located.sheet, current, active).matches
+        } else {
+            buildMap {
+                put(audio, current)
+                for (item in libraryTracks(active)) {
+                    val path = pathOf(item) ?: continue
+                    val sameAlbum = item.album.trim().equals(album, ignoreCase = true) &&
+                        item.albumArtist.trim().ifBlank { item.artist.trim() }.equals(artist, ignoreCase = true) &&
+                        (current.year <= 0 || item.year <= 0 || current.year == item.year)
+                    if (sameAlbum || path in explicit) putIfAbsent(path, item)
+                }
+            }
         }
 
-        val siblings = CueDiscovery.findAll(sources.keys - explicit, active = active)
+        val siblingPaths = sources.keys - setOf(audio)
+        val siblings = CueDiscovery.findAll(siblingPaths, active = active)
+        val unchanged = siblings.keys == siblingPaths.intersect(explicit) &&
+            siblings.values.all { it.path == located.path }
+        if (unchanged) {
+            return FollowedCue(located.path, ProbeResult(located.sheet, sources.filterKeys { it in explicit }, current))
+        }
         val additional = siblings.keys.sorted().flatMap { path ->
             siblings.getValue(path).sheet.tracks.filter { it.audio == path }
         }
-        if (additional.isEmpty()) {
-            return FollowedCue(located.path, ProbeResult(located.sheet, sources.filterKeys { it in explicit }, current))
-        }
-        val tracks = (located.sheet.tracks + additional).groupBy { it.audio }.toSortedMap().values.flatten()
-        val sheet = CueSheet("专辑 CUE", album, tracks)
-        return FollowedCue(null, ProbeResult(sheet, sources.filterKeys { it in explicit || it in siblings }, current))
+        // Library discs use their own winning CUE. Keep explicit references that are not in the library.
+        val original = located.sheet.tracks.filter { it.audio == audio || it.audio !in sources }
+        val tracks = (original + additional).groupBy { it.audio }.toSortedMap().values.flatten()
+        val sheet = CueSheet("专辑 CUE", album.takeIf { it.isNotEmpty() } ?: located.sheet.title, tracks)
+        return FollowedCue(null, ProbeResult(sheet, sources.filterKeys { it == audio || it in siblings }, current))
     }
 
     fun findAlbumCue(trackId: String): AlbumCue {
@@ -129,14 +164,14 @@ internal object LibraryProbe {
         }
     }
 
-    fun inspect(sheet: CueSheet, current: MediaItem?): ProbeResult {
+    fun inspect(sheet: CueSheet, current: MediaItem?, active: () -> Boolean = { true }): ProbeResult {
         val currentPath = pathOf(current)
         val pending = sheet.tracks.mapTo(mutableSetOf()) { it.audio }
         val matches = mutableMapOf<Path, MediaItem>()
         if (currentPath != null && current != null && current.id.isNotBlank() && pending.remove(currentPath)) {
             matches[currentPath] = current
         }
-        if (pending.isNotEmpty()) for (item in libraryTracks { true }) {
+        if (pending.isNotEmpty()) for (item in libraryTracks(active)) {
             val path = pathOf(item) ?: continue
             if (pending.remove(path)) matches[path] = item
             if (pending.isEmpty()) break

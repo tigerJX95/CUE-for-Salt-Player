@@ -9,8 +9,12 @@ import java.nio.file.Path
 internal data class CueSheet(
     val encoding: String,
     val title: String?,
-    val tracks: List<CueTrack>
-)
+    val tracks: List<CueTrack>,
+    val albumPerformer: String? = null
+) {
+    fun wholeFileArtistFallback(artist: String?, albumArtist: String?): String? =
+        if (artist.artistName() != null) null else albumArtist.artistName() ?: albumPerformer
+}
 
 internal data class CueTrack(
     val number: Int,
@@ -160,11 +164,12 @@ internal object CueParser {
                 ends[previous.number] = end
             }
         }
+        val performer = albumPerformer.artistName()
         return CueSheet(encoding, album, drafts.filter { it.isAudio }.map { track ->
             CueTrack(track.number, track.title?.takeIf { it.isNotBlank() } ?: "TRACK %02d".format(track.number),
-                track.performer.artistName() ?: albumPerformer.artistName(),
+                track.performer.artistName() ?: performer,
                 track.audio, track.start(), ends[track.number], track.indexes[0], track.pregap)
-        })
+        }, performer)
     }
 
     private fun resolveAudio(folder: Path, value: String): Path {

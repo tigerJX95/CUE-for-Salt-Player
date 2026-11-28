@@ -99,6 +99,80 @@ class CueDiscoveryTest {
         assertEquals("Other", updated.getValue(audio).sheet.tracks.single().title)
     }
 
+    @Test fun aSharedAlbumCueMatchesBothDiscFolders() {
+        val first = Files.createDirectory(folder().resolve("CD1")).resolve("first.wav")
+        val second = Files.createDirectory(folder().resolve("Disc 2")).resolve("second.wav")
+        val shared = Files.writeString(folder().resolve("album.cue"), """
+            FILE "CD1/first.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE First
+              INDEX 01 00:00:00
+            FILE "Disc 2\second.wav" WAVE
+            TRACK 02 AUDIO
+              TITLE Second
+              INDEX 01 00:00:00
+        """.trimIndent())
+
+        assertEquals(shared, CueDiscovery.find(first)?.path)
+        assertEquals(shared, CueDiscovery.find(second)?.path)
+        val matches = CueDiscovery.findAll(listOf(first, second)) { true }
+        assertSame(matches.getValue(first), matches.getValue(second))
+        assertEquals(listOf(first, second), matches.getValue(first).sheet.tracks.map { it.audio })
+    }
+
+    @Test fun aLocalMatchOrConflictTakesPrecedenceOverTheSharedSheet() {
+        val disc = Files.createDirectory(folder().resolve("CD1"))
+        val audio = disc.resolve("album.wav")
+        val shared = cue("shared.cue", "CD1/album.wav")
+        val local = Files.copy(shared, disc.resolve("A.cue"))
+        Files.writeString(local, Files.readString(local).replace("CD1/album.wav", "album.wav"))
+
+        assertEquals(local, CueDiscovery.find(audio)?.path)
+        assertEquals(local, CueDiscovery.findAll(listOf(audio)) { true }.getValue(audio).path)
+
+        Files.copy(local, disc.resolve("B.cue"))
+        assertThrows(IllegalStateException::class.java) { CueDiscovery.find(audio) }
+        assertTrue(CueDiscovery.findAll(listOf(audio)) { true }.isEmpty())
+    }
+
+    @Test fun sharedMatchingIgnoresOtherAncestorsAndRequiresAnExplicitDiscFolder() {
+        val album = Files.createDirectory(folder().resolve("Album"))
+        val disc = Files.createDirectory(album.resolve("CD1")).resolve("album.wav")
+        val other = Files.createDirectory(album.resolve("Other")).resolve("album.wav")
+        cue("grandparent.cue", "Album/CD1/album.wav")
+        Files.writeString(album.resolve("unrelated.cue"), """
+            FILE "Other/album.wav" WAVE
+            TRACK 01 AUDIO
+              INDEX 01 00:00:00
+        """.trimIndent())
+
+        assertNull(CueDiscovery.find(disc))
+        assertNull(CueDiscovery.find(other))
+        assertTrue(CueDiscovery.findAll(listOf(disc, other)) { true }.isEmpty())
+    }
+
+    @Test fun invalidatingADiscRereadsTheSharedCueWithPreservedTimestamps() {
+        val disc = Files.createDirectory(folder().resolve("CD1"))
+        val audio = disc.resolve("album.wav")
+        val shared = cue("album.cue", "CD1/album.wav")
+        Files.writeString(shared, Files.readString(shared) + "\nTITLE First")
+        Files.setLastModifiedTime(shared, FileTime.fromMillis(1_700_000_000_000L))
+        val stamp = Files.getLastModifiedTime(shared)
+        val cache = CueDiscovery.ParsedCueCache()
+        val initial = CueDiscovery.findAll(listOf(audio), cache) { true }
+
+        Files.writeString(shared, Files.readString(shared).replace("First", "Other"))
+        Files.setLastModifiedTime(shared, stamp)
+        cache.invalidateFolders(setOf(disc))
+        val updated = CueDiscovery.findAll(listOf(audio), cache) { true }
+        assertEquals("Other", updated.getValue(audio).sheet.tracks.single().title)
+        assertEquals("Other", CueDiscovery.refreshMatches(initial, setOf(audio)) { true }
+            .getValue(audio).sheet.tracks.single().title)
+
+        Files.delete(shared)
+        assertTrue(CueDiscovery.refreshMatches(updated, setOf(audio)) { true }.isEmpty())
+    }
+
     private fun folder(): Path = temp.root.toPath()
 
     private fun cue(name: String, audioName: String, charset: Charset = Charsets.UTF_8): Path =
